@@ -177,6 +177,25 @@ const schema = z.object({
    * cookies_only | server — только главная WB + куки + card (без «толстой» карточки); для VPS без GUI.
    */
   REPRICER_BUYER_VERIFY_MODE: z.string().optional().default(""),
+
+  /** --- Public Playwright parse (PUBLIC ONLY / проба карточки) --- */
+  REPRICER_PUBLIC_BROWSER_HEADLESS: z.string().optional().default("true"),
+  REPRICER_PUBLIC_BROWSER_CHANNEL: z.enum(["chromium", "chrome"]).default("chromium"),
+  /** Пусто — см. REPRICER_DEFAULT_PUBLIC_USER_AGENT в publicBrowserRuntime */
+  REPRICER_PUBLIC_BROWSER_USER_AGENT: z.string().optional().default(""),
+  REPRICER_PUBLIC_BROWSER_LOCALE: z.string().default("ru-RU"),
+  REPRICER_PUBLIC_BROWSER_TIMEZONE: z.string().default("Europe/Moscow"),
+  REPRICER_PUBLIC_BROWSER_VIEWPORT_WIDTH: z.coerce.number().min(800).max(2560).default(1366),
+  REPRICER_PUBLIC_BROWSER_VIEWPORT_HEIGHT: z.coerce.number().min(600).max(2000).default(900),
+  REPRICER_PUBLIC_BROWSER_SLOWMO_MS: z.coerce.number().min(0).max(10_000).default(0),
+  REPRICER_PUBLIC_BROWSER_EXTRA_WAIT_MS: z.coerce.number().min(0).max(120_000).default(2000),
+  REPRICER_PUBLIC_BROWSER_JITTER_MS: z.coerce.number().min(0).max(30_000).default(3000),
+  REPRICER_PUBLIC_PARSE_DEBUG: z.string().optional().default("false"),
+  /** Пусто → {TMP_DIR}/public-parse-debug */
+  REPRICER_PUBLIC_PARSE_DEBUG_DIR: z.string().optional().default(""),
+  REPRICER_PUBLIC_PROXY_SERVER: z.string().optional().default(""),
+  REPRICER_PUBLIC_PROXY_USERNAME: z.string().optional().default(""),
+  REPRICER_PUBLIC_PROXY_PASSWORD: z.string().optional().default(""),
 });
 
 export type AppEnv = z.infer<typeof schema>;

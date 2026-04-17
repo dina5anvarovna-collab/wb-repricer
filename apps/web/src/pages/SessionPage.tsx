@@ -35,6 +35,19 @@ type AuthStatus = {
 type PublicParseStatusPayload = {
   buyerAuthDisabled: boolean;
   publicOnly: boolean;
+  lastPublicProbe: {
+    at: string;
+    nmId: number | null;
+    ok: boolean;
+    parseStatus: string | null;
+    blockReason: string | null;
+    priceParseSource: string | null;
+    confidence: number | null;
+    browserUrlAfterParse: string | null;
+    pageTitle: string | null;
+    attemptCount: number;
+    debugArtifactPaths: string[];
+  } | null;
   env: Record<string, string>;
   lastMonitorJob: {
     id: string;
@@ -154,8 +167,14 @@ export function SessionPage() {
       apiFetch<{
         ok: boolean;
         parseStatus?: string;
+        blockReason?: string | null;
         priceParseSource?: string | null;
         nmId?: number;
+        browserUrlAfterParse?: string | null;
+        pageTitle?: string | null;
+        confidence?: number;
+        debugArtifactPaths?: string[];
+        attemptCount?: number;
       }>("/api/settings/parse-probe-public", {
         method: "POST",
         json: { nmId },
@@ -301,6 +320,56 @@ export function SessionPage() {
         {interpretation?.confidenceNote ? (
           <p className="mt-2 text-xs text-[#8b93a7]">{interpretation.confidenceNote}</p>
         ) : null}
+        {pub.data?.lastPublicProbe ? (
+          <div className="mt-4 rounded-lg border border-[#252a33] bg-[#0c0e12] p-3 text-xs text-[#c4c9d4]">
+            <p className="font-medium text-[#e8eaef]">Последняя проба public parse</p>
+            <ul className="mt-2 space-y-1 font-mono text-[11px] leading-relaxed">
+              <li>
+                Время:{" "}
+                <span className="text-[#c4c9d4]">
+                  {new Date(pub.data.lastPublicProbe.at).toLocaleString("ru-RU")}
+                </span>
+              </li>
+              <li>
+                nmId: <span className="text-white">{pub.data.lastPublicProbe.nmId ?? "—"}</span>
+              </li>
+              <li>
+                parseStatus:{" "}
+                <span className="text-white">{pub.data.lastPublicProbe.parseStatus ?? "—"}</span>
+              </li>
+              <li>
+                Причина / blockReason:{" "}
+                <span className="text-amber-200">{pub.data.lastPublicProbe.blockReason ?? "—"}</span>
+              </li>
+              <li className="break-all">
+                URL после парсинга:{" "}
+                <span className="text-[#8cb4ff]">{pub.data.lastPublicProbe.browserUrlAfterParse ?? "—"}</span>
+              </li>
+              <li className="break-all">
+                title: <span className="text-[#c4c9d4]">{pub.data.lastPublicProbe.pageTitle ?? "—"}</span>
+              </li>
+              <li>
+                Попыток:{" "}
+                <span className="text-white">{pub.data.lastPublicProbe.attemptCount ?? "—"}</span>
+              </li>
+            </ul>
+            {pub.data.lastPublicProbe.debugArtifactPaths &&
+            pub.data.lastPublicProbe.debugArtifactPaths.length > 0 ? (
+              <div className="mt-2 text-[11px] text-[#8b93a7]">
+                Debug файлы:
+                <ul className="mt-1 list-inside list-disc space-y-0.5">
+                  {pub.data.lastPublicProbe.debugArtifactPaths.map((p, i) => (
+                    <li key={i} className="break-all">
+                      {p}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <p className="mt-2 text-xs text-[#8b93a7]">Последняя проба ещё не выполнялась на этом процессе.</p>
+        )}
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -438,9 +507,47 @@ export function SessionPage() {
         </button>
       </div>
       {probeM.data ? (
-        <pre className="overflow-x-auto rounded-lg bg-black/40 p-3 text-xs text-[#9aa3b5]">
-          {JSON.stringify(probeM.data, null, 2)}
-        </pre>
+        <div className="space-y-2 rounded-lg bg-black/40 p-3 text-xs text-[#c4c9d4]">
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            <span>
+              ok:{" "}
+              <strong className={probeM.data.ok ? "text-emerald-400" : "text-red-400"}>
+                {probeM.data.ok ? "yes" : "no"}
+              </strong>
+            </span>
+            <span>
+              parseStatus: <strong className="text-white">{probeM.data.parseStatus ?? "—"}</strong>
+            </span>
+            <span>
+              blockReason:{" "}
+              <strong className="text-amber-200">{probeM.data.blockReason ?? "—"}</strong>
+            </span>
+            <span>
+              attemptCount:{" "}
+              <strong className="text-white">{probeM.data.attemptCount ?? "—"}</strong>
+            </span>
+          </div>
+          <p className="break-all text-[11px] text-[#8cb4ff]">{probeM.data.browserUrlAfterParse ?? ""}</p>
+          <p className="break-all text-[11px] text-[#9aa3b5]">{probeM.data.pageTitle ?? ""}</p>
+          {probeM.data.debugArtifactPaths && probeM.data.debugArtifactPaths.length > 0 ? (
+            <div className="text-[11px] text-[#8b93a7]">
+              Debug:
+              <ul className="mt-1 list-inside list-disc">
+                {probeM.data.debugArtifactPaths.map((p, i) => (
+                  <li key={i} className="break-all">
+                    {p}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <details className="text-[11px] text-[#8b93a7]">
+            <summary className="cursor-pointer text-[#c4c9d4]">Полный JSON</summary>
+            <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all text-[#9aa3b5]">
+              {JSON.stringify(probeM.data, null, 2)}
+            </pre>
+          </details>
+        </div>
       ) : null}
 
       {!buyerOff ? (

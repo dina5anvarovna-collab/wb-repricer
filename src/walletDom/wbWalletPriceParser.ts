@@ -8,6 +8,16 @@ import { env } from "../config/env.js";
 import { isPublicOnlyWalletParse } from "../lib/repricerMode.js";
 import { runExclusiveBuyerChromeProfile } from "../lib/buyerChromeProfileLock.js";
 import { logger } from "../lib/logger.js";
+import {
+  buildPublicPersistentLaunchOptions,
+  buildPublicProxyFromEnv,
+  envPublicParseDebugEnabled,
+  publicExtraWaitMs,
+  randomPublicJitterWaitMs,
+  resolvePublicBrowserHeadless,
+} from "../lib/publicBrowserRuntime.js";
+import { detectPublicParseBlockSignals, type PublicParseBlockReason } from "../lib/publicParseBlockReason.js";
+import { savePublicParseDebugArtifacts } from "../lib/publicParseDebug.js";
 import { resolveStockLevel } from "../lib/stockLevel.js";
 import { tryShowcaseRubViaCardWbTopLevelNavigation } from "./cardWbTopNavigation.js";
 import {
@@ -338,18 +348,25 @@ async function gotoVerified(
   targetUrl: string,
   resolvedBrowserLabel: string,
   diagTag: string,
-): Promise<boolean> {
-  await page.goto(targetUrl, {
-    waitUntil: "domcontentloaded",
-    timeout: 90_000,
-  });
+): Promise<{ ok: boolean; httpStatus: number | null }> {
+  let httpStatus: number | null = null;
+  try {
+    const resp = await page.goto(targetUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: 90_000,
+    });
+    httpStatus = resp?.status() ?? null;
+  } catch (e) {
+    await logBlankPageDiagnostics(page, resolvedBrowserLabel, diagTag).catch(() => {});
+    throw e;
+  }
   await waitDomContentThenPriceReady(page);
   const len = await bodyInnerTextLength(page);
   if (len > 0) {
-    return true;
+    return { ok: true, httpStatus };
   }
   await logBlankPageDiagnostics(page, resolvedBrowserLabel, diagTag);
-  return false;
+  return { ok: false, httpStatus };
 }
 
 async function openLoginFlow(
@@ -360,8 +377,8 @@ async function openLoginFlow(
   for (let i = 0; i < LOGIN_URL_SEQUENCE.length; i += 1) {
     const u = LOGIN_URL_SEQUENCE[i];
     try {
-      const ok = await gotoVerified(page, u, resolvedBrowserLabel, `login-${i}`);
-      if (ok) {
+      const nav = await gotoVerified(page, u, resolvedBrowserLabel, `login-${i}`);
+      if (nav.ok) {
         opened = true;
         break;
       }
@@ -386,6 +403,12 @@ export type WalletParserInput = {
   region?: string;
   headless?: boolean;
   loginMode?: boolean;
+  /** Индекс попытки public retry (логи). */
+  attemptIndex?: number;
+  /**
+   * Принудительно применить REPRICER_PUBLIC_* (проба карточки / тест), даже если режим не public_only.
+   */
+  applyPublicBrowserEnv?: boolean;
   /**
    * chrome: prefer installed Google Chrome (macOS paths or CHROME_PATH); else bundled Chromium.
    * chromium: always Playwright's bundled browser (for testing / CI).
@@ -467,6 +490,15 @@ export type WalletParserResult = {
   showcaseRubFromDom?: number | null;
   showcasePriceRub?: number | null;
   priceWithSppWithoutWalletRub?: number | null;
+  /** Уточнённая причина блока / сбоя (PUBLIC parse). */
+  blockReason?: PublicParseBlockReason | null;
+  pageTitle?: string | null;
+  /** Первые ~4KB текста body для диагностики. */
+  pageTextSnippet?: string | null;
+  debugArtifactPaths?: string[];
+  attemptCount?: number;
+  /** HTTP статус ответа документа последней goto на карточку. */
+  mainResponseHttpStatus?: number | null;
   verificationMethod?: "dom_wallet" | "unverified";
   verificationStatus?: "VERIFIED" | "UNVERIFIED";
   verificationReason?: string;
@@ -653,23 +685,6 @@ async function extractJsonLdPriceHints(page: Page): Promise<{ offer?: number; ag
   });
 }
 
-function classifyPageIssues(bodyText: string, pageUrl: string): WalletParseStatus | null {
-  const u = pageUrl.toLowerCase();
-  const t = bodyText.slice(0, 12_000);
-  if (/капч|captcha|вы\s+робот|подтвердите,\s*что\s+вы\s+не\s+робот/i.test(t)) {
-    return "blocked_or_captcha";
-  }
-  if (
-    /security\/login|passport\.wildberries/i.test(u) ||
-    (t.length < 400 &&
-      /войти\s+по\s+коду|вход\s+или\s+регистрация/i.test(t) &&
-      !/\/catalog\/\d+\//i.test(u))
-  ) {
-    return "auth_required";
-  }
-  return null;
-}
-
 function buildWalletResult(input: {
   nmId: number;
   url: string;
@@ -816,6 +831,34 @@ async function firstVisiblePriceText(page: Page): Promise<string | null> {
       function norm(s: string): string {
         return s.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
       }
+      try {
+        const meta = document.querySelector('meta[itemprop="price"][content]') as HTMLMetaElement | null;
+        const mc = meta?.content?.trim();
+        if (mc && /^\d/.test(mc)) {
+          const num = mc.replace(/\s/g, "").replace(",", ".");
+          return `${num} ₽`;
+        }
+      } catch {
+        /* ignore */
+      }
+      try {
+        const ip = document.querySelector("[itemprop=price], [itemprop=lowPrice]") as HTMLElement | null;
+        if (ip && vis(ip)) {
+          const t = norm(ip.innerText || "");
+          if (/(₽|руб)/i.test(t) && t.length >= 2 && t.length <= 64) return t;
+          const c = ip.getAttribute("content");
+          if (c && /^\d/.test(c)) return `${c.replace(/\s/g, "").replace(",", ".")} ₽`;
+        }
+        const ins = document.querySelector(
+          "ins.priceBlockFinalPrice, [class*='priceBlockFinalPrice'], [class*='productPrice']",
+        ) as HTMLElement | null;
+        if (ins && vis(ins)) {
+          const t = norm(ins.innerText || "");
+          if (/(₽|руб)/i.test(t) && t.length >= 2 && t.length <= 72) return t;
+        }
+      } catch {
+        /* ignore */
+      }
       const buyRoots = Array.from(document.querySelectorAll<HTMLElement>("div,section,aside"))
         .filter((el) => {
           if (!vis(el)) return false;
@@ -942,8 +985,12 @@ async function tryOpenPriceDetailsPopup(page: Page): Promise<{
 }> {
   const out: { popupOpened: boolean; walletRub: number | null; withoutWalletRub: number | null } =
     { popupOpened: false, walletRub: null, withoutWalletRub: null };
-  const trigger = page.locator('[class*="productLinePriceWallet"]').first();
-  const hasTrigger = (await trigger.count().catch(() => 0)) > 0;
+  let trigger = page.locator('[class*="productLinePriceWallet"]').first();
+  let hasTrigger = (await trigger.count().catch(() => 0)) > 0;
+  if (!hasTrigger) {
+    trigger = page.locator('[class*="PriceWallet"][class*="product"], [data-link*="walletPrice"]').first();
+    hasTrigger = (await trigger.count().catch(() => 0)) > 0;
+  }
   if (!hasTrigger) return out;
   await trigger.scrollIntoViewIfNeeded().catch(() => {});
   await trigger.click({ timeout: 2500 }).catch(() => {});
@@ -1065,8 +1112,8 @@ async function readWalletAfterHardReload(input: {
 }): Promise<{ walletRub: number | null; firstVisibleText: string | null }> {
   const { page, parserInput, resolved } = input;
   const { url } = ensureUrl(parserInput);
-  const ok = await gotoVerified(page, url, resolved.label, "region-stability-reload");
-  if (!ok) return { walletRub: null, firstVisibleText: null };
+  const nav = await gotoVerified(page, url, resolved.label, "region-stability-reload");
+  if (!nav.ok) return { walletRub: null, firstVisibleText: null };
   await waitPriceReady(page);
   const firstVisibleText = await firstVisiblePriceText(page);
   const dom = await extractDomSignals(page);
@@ -1799,6 +1846,10 @@ async function resolveRegionalShowcasePrice(input: {
   });
 }
 
+function usePublicRuntimeConfig(input: WalletParserInput): boolean {
+  return isPublicOnlyWalletParse() || input.applyPublicBrowserEnv === true;
+}
+
 /**
  * Одна карточка WB на уже открытой странице (браузер и контекст снаружи).
  */
@@ -1817,6 +1868,18 @@ async function scrapeWalletPriceOnPage(
   const capturedCardBodies: unknown[] = [];
   const cardInflight: Promise<void>[] = [];
   const detachCardSniffer = attachCardDetailResponseSniffer(page, capturedCardBodies, cardInflight);
+  const publicRuntime = usePublicRuntimeConfig(input);
+  let lastDocHttpStatus: number | null = null;
+  logger.info(
+    {
+      tag: "public_parse_started",
+      nmId,
+      url,
+      publicRuntime,
+      attemptIndex: input.attemptIndex ?? null,
+    },
+    "scrape wallet page started",
+  );
 
   let lastErr: unknown = null;
   try {
@@ -1825,8 +1888,9 @@ async function scrapeWalletPriceOnPage(
       cardInflight.length = 0;
       capturedCardBodies.length = 0;
       try {
-        const ok = await gotoVerified(page, url, resolved.label, `product-${attempt}`);
-        if (!ok) {
+        const nav = await gotoVerified(page, url, resolved.label, `product-${attempt}`);
+        lastDocHttpStatus = nav.httpStatus;
+        if (!nav.ok) {
           lastErr = new Error("product page has no body text after domcontentloaded+price-ready wait");
           if (attempt === 2) {
             throw lastErr;
@@ -1872,8 +1936,9 @@ async function scrapeWalletPriceOnPage(
               },
               "WB: в адресе вкладки нет нужного dest (часто SPA/профиль); повторный переход на карточку",
             );
-            const okRedo = await gotoVerified(page, url, resolved.label, `product-redo-dest-${attempt}`);
-            if (okRedo) {
+            const navRedo = await gotoVerified(page, url, resolved.label, `product-redo-dest-${attempt}`);
+            lastDocHttpStatus = navRedo.httpStatus;
+            if (navRedo.ok) {
               await waitPriceReady(page);
               const firstPriceRedo = await firstVisiblePriceText(page);
               logger.info(
@@ -1899,6 +1964,10 @@ async function scrapeWalletPriceOnPage(
         }
         await page.waitForTimeout(1100);
         await page.waitForTimeout(2500 + attempt * 1500);
+        if (publicRuntime) {
+          await page.waitForTimeout(publicExtraWaitMs());
+          await page.waitForTimeout(randomPublicJitterWaitMs());
+        }
         await Promise.allSettled(cardInflight);
         break;
       } catch (err) {
@@ -1913,9 +1982,40 @@ async function scrapeWalletPriceOnPage(
     }
 
     const bodyPreview = await page.innerText("body").catch(() => "");
-    const blocked = classifyPageIssues(bodyPreview, page.url());
-    if (blocked) {
+    const pageTitleEarly = await page.title().catch(() => "");
+    const sig = detectPublicParseBlockSignals({
+      bodyText: bodyPreview,
+      pageUrl: page.url(),
+      expectedNmId: nmId,
+      mainResponseStatus: lastDocHttpStatus,
+    });
+    if (sig.reason !== "ok") {
+      logger.warn(
+        {
+          tag: "public_parse_block_detected",
+          nmId,
+          url: page.url(),
+          reason: sig.reason,
+          legacyParseStatus: sig.legacyParseStatus,
+          httpStatus: lastDocHttpStatus,
+          parseStatusProbe: sig.legacyParseStatus ?? "blocked_or_captcha",
+        },
+        "public parse: страница похожа на блок/капчу/редирект",
+      );
       await saveArtifacts(page, nmId, [], "", dedupe([...networkUrls]));
+      const snippet = bodyPreview.slice(0, 4096);
+      const dbg = (
+        await savePublicParseDebugArtifacts({
+          page,
+          nmId,
+          reason: sig.reason,
+          pageTitle: pageTitleEarly,
+          bodySnippet: snippet,
+          attemptIndex: input.attemptIndex,
+        })
+      ).paths;
+      const parseStatusBlocked: WalletParseStatus =
+        sig.legacyParseStatus ?? (sig.reason === "auth_required" ? "auth_required" : "blocked_or_captcha");
       return {
         nmId,
         url,
@@ -1928,10 +2028,20 @@ async function scrapeWalletPriceOnPage(
         inStock: null,
         parsedAt: new Date().toISOString(),
         source: "dom",
-        parseStatus: blocked,
+        parseStatus: parseStatusBlocked,
         sourceConfidence: 0,
-        parseMethod: "page_blocked",
+        parseMethod:
+          sig.reason === "captcha"
+            ? "page_blocked_captcha"
+            : sig.reason === "anti_bot_page"
+              ? "page_blocked_antibot"
+              : "page_blocked",
         browserUrlAfterParse: page.url(),
+        blockReason: sig.reason,
+        pageTitle: pageTitleEarly,
+        pageTextSnippet: snippet,
+        mainResponseHttpStatus: lastDocHttpStatus,
+        debugArtifactPaths: dbg.length > 0 ? dbg : undefined,
       };
     }
 
@@ -2124,7 +2234,57 @@ async function scrapeWalletPriceOnPage(
       await logBlankPageDiagnostics(page, resolved.label, "parse-failed");
     }
 
-    return { ...result, browserUrlAfterParse: page.url() };
+    const snippetFinal = (await page.innerText("body").catch(() => "")).slice(0, 4096);
+    const titleFinal = await page.title().catch(() => "");
+    let out: WalletParserResult = {
+      ...result,
+      browserUrlAfterParse: page.url(),
+      pageTitle: titleFinal,
+      pageTextSnippet: snippetFinal,
+      mainResponseHttpStatus: lastDocHttpStatus,
+    };
+    if (out.parseStatus === "parse_failed" && !out.blockReason) {
+      out = { ...out, blockReason: "selector_missing" };
+      logger.warn(
+        { tag: "public_parse_selector_missing", nmId, parseStatus: out.parseStatus },
+        "DOM без уверенной цены после проверки блоков",
+      );
+    }
+    if (
+      envPublicParseDebugEnabled() &&
+      publicRuntime &&
+      out.parseStatus === "parse_failed"
+    ) {
+      const paths = (
+        await savePublicParseDebugArtifacts({
+          page,
+          nmId,
+          reason: out.blockReason ?? "unexpected",
+          pageTitle: titleFinal,
+          bodySnippet: snippetFinal,
+          attemptIndex: input.attemptIndex,
+        })
+      ).paths;
+      out = { ...out, debugArtifactPaths: paths };
+    }
+
+    const okDom =
+      out.parseStatus === "wallet_found" ||
+      out.parseStatus === "only_regular_found" ||
+      (out.priceRegular != null && out.priceRegular > 0);
+    logger.info(
+      {
+        tag: okDom ? "public_parse_success" : "public_parse_failed",
+        nmId,
+        parseStatus: out.parseStatus,
+        blockReason: out.blockReason ?? null,
+        priceParseSource: out.priceParseSource ?? null,
+        confidence: out.sourceConfidence,
+      },
+      okDom ? "product page scrape success" : "product page scrape finished without usable price",
+    );
+
+    return out;
   } finally {
     detachCardSniffer();
   }
@@ -2355,30 +2515,46 @@ export async function getWbWalletPrice(input: WalletParserInput): Promise<Wallet
 async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<WalletParserResult> {
   const networkUrls = new Set<string>();
 
-  const browserKind: BrowserKind =
-    input.browser ??
-    (env.BROWSER_EXECUTABLE_PATH.trim()
+  const usePublic = usePublicRuntimeConfig(input);
+
+  const browserKind: BrowserKind = usePublic
+    ? env.REPRICER_PUBLIC_BROWSER_CHANNEL === "chrome"
       ? "chrome"
-      : process.platform === "darwin"
+      : "chromium"
+    : input.browser ??
+      (env.BROWSER_EXECUTABLE_PATH.trim()
         ? "chrome"
-        : "chromium");
+        : process.platform === "darwin"
+          ? "chrome"
+          : "chromium");
   const resolved = resolveLaunchBrowser(browserKind);
 
-  const launchOpts: Parameters<typeof chromium.launchPersistentContext>[1] = {
-    headless: input.headless ?? true,
-    locale: "ru-RU",
-    proxy: input.proxy ? { server: input.proxy } : undefined,
-    viewport: { width: 1440, height: 1900 },
-    ...(resolved.executablePath
-      ? { executablePath: resolved.executablePath }
-      : {}),
-    // WB often отдаёт пустой/белый document при типичном automation-профиле Chrome.
-    ignoreDefaultArgs: ["--enable-automation"],
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--disable-session-crashed-bubble",
-    ],
-  };
+  let launchOpts: Parameters<typeof chromium.launchPersistentContext>[1];
+  if (usePublic) {
+    const hl = resolvePublicBrowserHeadless(input.headless);
+    if (hl.headedFallback && hl.note) {
+      logger.warn({ tag: "public_browser_launch", note: hl.note }, "public browser headed fallback");
+    }
+    launchOpts = buildPublicPersistentLaunchOptions({
+      resolvedExecutablePath: resolved.executablePath,
+      headless: hl.headless,
+      proxy: buildPublicProxyFromEnv(),
+      inputProxy: input.proxy,
+    });
+  } else {
+    launchOpts = {
+      headless: input.headless ?? true,
+      locale: "ru-RU",
+      proxy: input.proxy ? { server: input.proxy } : undefined,
+      viewport: { width: 1440, height: 1900 },
+      ...(resolved.executablePath ? { executablePath: resolved.executablePath } : {}),
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-session-crashed-bubble",
+      ],
+    };
+  }
 
   // eslint-disable-next-line no-console
   console.error(`[wb-wallet] launching persistent context; browserExecutable=${resolved.label}`);
@@ -2398,6 +2574,19 @@ async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<Walle
       get: () => undefined,
     });
   });
+
+  if (usePublic) {
+    await context.addInitScript(() => {
+      try {
+        Object.defineProperty(window, "chrome", {
+          configurable: true,
+          value: { runtime: {} },
+        });
+      } catch {
+        /* ignore */
+      }
+    });
+  }
 
   try {
     const page = await context.newPage();
@@ -2498,29 +2687,46 @@ async function getWbWalletPriceBatchUnlocked(
   },
 ): Promise<WalletParserResult[]> {
   const networkUrls = new Set<string>();
-  const browserKind: BrowserKind =
-    base.browser ??
-    (env.BROWSER_EXECUTABLE_PATH.trim()
+  const usePublic = isPublicOnlyWalletParse() || base.applyPublicBrowserEnv === true;
+
+  const browserKind: BrowserKind = usePublic
+    ? env.REPRICER_PUBLIC_BROWSER_CHANNEL === "chrome"
       ? "chrome"
-      : process.platform === "darwin"
+      : "chromium"
+    : base.browser ??
+      (env.BROWSER_EXECUTABLE_PATH.trim()
         ? "chrome"
-        : "chromium");
+        : process.platform === "darwin"
+          ? "chrome"
+          : "chromium");
   const resolved = resolveLaunchBrowser(browserKind);
 
-  const launchOpts: Parameters<typeof chromium.launchPersistentContext>[1] = {
-    headless: base.headless ?? true,
-    locale: "ru-RU",
-    proxy: base.proxy ? { server: base.proxy } : undefined,
-    viewport: { width: 1440, height: 1900 },
-    ...(resolved.executablePath
-      ? { executablePath: resolved.executablePath }
-      : {}),
-    ignoreDefaultArgs: ["--enable-automation"],
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--disable-session-crashed-bubble",
-    ],
-  };
+  let launchOpts: Parameters<typeof chromium.launchPersistentContext>[1];
+  if (usePublic) {
+    const hl = resolvePublicBrowserHeadless(base.headless);
+    if (hl.headedFallback && hl.note) {
+      logger.warn({ tag: "public_browser_launch", note: hl.note }, "batch: public browser headed fallback");
+    }
+    launchOpts = buildPublicPersistentLaunchOptions({
+      resolvedExecutablePath: resolved.executablePath,
+      headless: hl.headless,
+      proxy: buildPublicProxyFromEnv(),
+      inputProxy: base.proxy,
+    });
+  } else {
+    launchOpts = {
+      headless: base.headless ?? true,
+      locale: "ru-RU",
+      proxy: base.proxy ? { server: base.proxy } : undefined,
+      viewport: { width: 1440, height: 1900 },
+      ...(resolved.executablePath ? { executablePath: resolved.executablePath } : {}),
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-session-crashed-bubble",
+      ],
+    };
+  }
 
   // eslint-disable-next-line no-console
   console.error(
@@ -2542,6 +2748,19 @@ async function getWbWalletPriceBatchUnlocked(
       get: () => undefined,
     });
   });
+
+  if (usePublic) {
+    await context.addInitScript(() => {
+      try {
+        Object.defineProperty(window, "chrome", {
+          configurable: true,
+          value: { runtime: {} },
+        });
+      } catch {
+        /* ignore */
+      }
+    });
+  }
 
   const inter = Math.max(0, Math.min(30_000, opts?.interStepDelayMs ?? 0));
   const useShowcaseCookies = opts?.fetchShowcaseWithCookies === true;

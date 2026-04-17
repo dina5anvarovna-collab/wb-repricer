@@ -3,12 +3,28 @@ import { env } from "../../config/env.js";
 import { validateSellerToken } from "../wbSellerApi/client.js";
 import { decryptToken } from "../../lib/crypto/tokenVault.js";
 import { healthBrowser } from "./healthChecks.js";
+import {
+  buildPublicProxyFromEnv,
+  envPublicParseDebugEnabled,
+  resolvePublicBrowserHeadless,
+} from "../../lib/publicBrowserRuntime.js";
+import { getLastPublicParseProbe } from "../../lib/publicParseProbeState.js";
 
 export async function healthPublicParse(): Promise<{
   ok: boolean;
   lastMonitorJobStatus: string | null;
   lastMonitorFinishedAt: string | null;
   parseStats: Record<string, unknown> | null;
+  /** Режим headless для REPRICER_PUBLIC_BROWSER_* (эффективное значение после fallback). */
+  publicBrowserHeadless: boolean;
+  publicBrowserHeadedFallback: boolean;
+  publicProxyEnabled: boolean;
+  publicParseDebugEnabled: boolean;
+  lastProbeAt: string | null;
+  lastProbeOk: boolean | null;
+  lastParseStatus: string | null;
+  lastBlockReason: string | null;
+  lastProbeSuccessAt: string | null;
 }> {
   const row = await prisma.syncJob.findFirst({
     where: { type: "monitor" },
@@ -22,11 +38,25 @@ export async function healthPublicParse(): Promise<{
       parseStats = null;
     }
   }
+
+  const hl = resolvePublicBrowserHeadless(undefined);
+  const proxy = buildPublicProxyFromEnv();
+  const probe = getLastPublicParseProbe();
+
   return {
     ok: row?.status === "done",
     lastMonitorJobStatus: row?.status ?? null,
     lastMonitorFinishedAt: row?.finishedAt?.toISOString() ?? null,
     parseStats,
+    publicBrowserHeadless: hl.headless,
+    publicBrowserHeadedFallback: hl.headedFallback,
+    publicProxyEnabled: Boolean(proxy?.server),
+    publicParseDebugEnabled: envPublicParseDebugEnabled(),
+    lastProbeAt: probe?.at ?? null,
+    lastProbeOk: probe?.ok ?? null,
+    lastParseStatus: probe?.parseStatus ?? null,
+    lastBlockReason: probe?.blockReason ?? null,
+    lastProbeSuccessAt: probe?.ok === true ? probe.at : null,
   };
 }
 

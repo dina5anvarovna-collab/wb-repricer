@@ -67,6 +67,8 @@ import {
 } from "../modules/buyerSession/buyerSessionManager.js";
 import { resolveWalletDomBrowserKind } from "../modules/wbBuyerDom/runWalletCli.js";
 import { getWbWalletPrice } from "../walletDom/wbWalletPriceParser.js";
+import { getWbWalletPriceWithPublicRetries } from "../walletDom/publicParseRetry.js";
+import { getLastPublicParseProbe, recordPublicParseProbe } from "../lib/publicParseProbeState.js";
 import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
 import {
   createEphemeralWalletProfileDir,
@@ -360,13 +362,22 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       logger.info({ nmId, tag: "parse-probe-public" }, "public parse started — ephemeral profile");
     }
     try {
-      const result = await getWbWalletPrice({
+      const commonOpts = {
         nmId,
         userDataDir: probeProfileDir,
-        headless: true,
         browser: resolveWalletDomBrowserKind(),
         fetchShowcaseWithCookies: spp,
-      });
+        applyPublicBrowserEnv: isBuyerAuthDisabled(),
+        ...(isBuyerAuthDisabled()
+          ? { headless: undefined }
+          : { headless: true }),
+      };
+
+      const { result, attemptCount } =
+        isBuyerAuthDisabled()
+          ? await getWbWalletPriceWithPublicRetries(commonOpts)
+          : { result: await getWbWalletPrice(commonOpts), attemptCount: 1 };
+
       const okParse =
         result.parseStatus !== "parse_failed" &&
         result.parseStatus !== "auth_required" &&
@@ -376,13 +387,34 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       } else if (result.priceParseSource === "public_dom") {
         logger.info({ nmId, tag: "parse-probe-public" }, "public dom parsed");
       }
+
+      recordPublicParseProbe({
+        at: new Date().toISOString(),
+        nmId,
+        ok: okParse,
+        parseStatus: result.parseStatus,
+        blockReason: result.blockReason ?? null,
+        priceParseSource: result.priceParseSource ?? null,
+        confidence: result.sourceConfidence ?? null,
+        browserUrlAfterParse: result.browserUrlAfterParse ?? null,
+        pageTitle: result.pageTitle ?? null,
+        attemptCount,
+        debugArtifactPaths: result.debugArtifactPaths ?? [],
+      });
+
       return {
         ok: okParse,
         parseStatus: result.parseStatus,
+        blockReason: result.blockReason ?? null,
         priceParseSource: result.priceParseSource ?? null,
         nmId: result.nmId,
         showcaseRubEffective: result.showcaseRubEffective ?? null,
         walletHint: result.priceWallet,
+        browserUrlAfterParse: result.browserUrlAfterParse ?? null,
+        pageTitle: result.pageTitle ?? null,
+        confidence: result.sourceConfidence,
+        debugArtifactPaths: result.debugArtifactPaths ?? [],
+        attemptCount,
         raw: result,
       };
     } catch (e) {
@@ -444,9 +476,11 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       typeof stats.unknown === "number"
         ? stats.publicDom + stats.popupDom + stats.unknown
         : null;
+
     return {
       buyerAuthDisabled: isBuyerAuthDisabled(),
       publicOnly: isPublicOnlyWalletParse(),
+      lastPublicProbe: getLastPublicParseProbe(),
       env: {
         REPRICER_DISABLE_BUYER_AUTH: env.REPRICER_DISABLE_BUYER_AUTH,
         REPRICER_WALLET_PARSE_MODE: env.REPRICER_WALLET_PARSE_MODE,
