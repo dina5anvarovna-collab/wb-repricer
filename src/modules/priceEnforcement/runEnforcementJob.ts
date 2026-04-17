@@ -6,6 +6,11 @@ import { getSelectedRegionDests } from "../../lib/monitorPrefs.js";
 import { writeAuditLog } from "../../lib/auditLog.js";
 import { isEmergencyStop, isGlobalPaused } from "../../lib/appSettings.js";
 import { getActiveCabinetToken, resolveBuyerProfileDir } from "../catalogSync/syncCatalog.js";
+import {
+  createEphemeralWalletProfileDir,
+  removeEphemeralWalletProfileDir,
+} from "../../lib/ephemeralWalletProfile.js";
+import { isBuyerAuthDisabled } from "../../lib/repricerMode.js";
 import { getBuyerDisplayedPrice } from "../wbBuyerDom/runWalletCli.js";
 import { resolveObservedBuyerPrices } from "../pricing/resolveObservedBuyerPrices.js";
 import {
@@ -105,13 +110,24 @@ export async function runEnforcementJob(opts: {
 
   let corrections = 0;
   let skipped = 0;
+  let ephemeralProfileDir: string | null = null;
 
   try {
-    const session = await prisma.buyerSession.findFirst({
-      where: { status: "active", isAuthorized: true },
-      orderBy: { updatedAt: "desc" },
-    });
-    const profileDir = session?.profileDir ?? resolveBuyerProfileDir();
+    const session = isBuyerAuthDisabled()
+      ? null
+      : await prisma.buyerSession.findFirst({
+          where: { status: "active", isAuthorized: true },
+          orderBy: { updatedAt: "desc" },
+        });
+    let profileDir = session?.profileDir ?? resolveBuyerProfileDir();
+    if (isBuyerAuthDisabled()) {
+      ephemeralProfileDir = createEphemeralWalletProfileDir();
+      profileDir = ephemeralProfileDir;
+      logger.info(
+        { tag: "enforce-public-only", profileDir },
+        "public parse — ephemeral browser profile (no buyer auth)",
+      );
+    }
     const selectedRegionDests = await getSelectedRegionDests();
 
     const products = await prisma.wbProduct.findMany({
@@ -151,8 +167,30 @@ export async function runEnforcementJob(opts: {
         nmId: p.nmId,
         profileDir,
         regionDest: opts.regionDest,
-        fetchShowcaseWithCookies: true,
+        fetchShowcaseWithCookies: !isBuyerAuthDisabled(),
       });
+
+      if (p.safeModeHold === true && !dom.success) {
+        logger.warn(
+          { nmId: p.nmId, tag: "enforce-safe-hold" },
+          "enforcement skipped — safe mode hold, live public parse unavailable",
+        );
+        await writeAuditLog({
+          action: "protection.skip",
+          entityType: "WbProduct",
+          entityId: p.id,
+          dryRun: opts.dryRun,
+          meta: {
+            nmId: p.nmId,
+            reason: "wallet_source_unavailable_safe_hold",
+            domError: dom.error ?? null,
+          },
+        });
+        skipped += 1;
+        processed += 1;
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+        continue;
+      }
 
       const stockLevel = resolveStockLevel(p.stock, dom.inStock ?? null);
       const lastRegionSnapshot = await prisma.priceSnapshot.findFirst({
@@ -651,6 +689,10 @@ export async function runEnforcementJob(opts: {
       data: { status: "failed", finishedAt: new Date(), errorMessage: msg.slice(0, 2000) },
     });
     throw e;
+  } finally {
+    if (ephemeralProfileDir) {
+      removeEphemeralWalletProfileDir(ephemeralProfileDir);
+    }
   }
 }
 

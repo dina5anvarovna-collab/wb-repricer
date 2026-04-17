@@ -14,6 +14,7 @@ import {
   resolveBuyerProfileDir,
 } from "../modules/catalogSync/syncCatalog.js";
 import { validateSellerToken } from "../modules/wbSellerApi/client.js";
+import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
 
 export async function buildSellerStatusPayload() {
   const cabinet = await prisma.sellerCabinet.findFirst({ where: { isActive: true } });
@@ -65,6 +66,12 @@ export async function buildSellerStatusPayload() {
       walletParseMode: env.REPRICER_WALLET_PARSE_MODE,
       buyerVerifyMode: env.REPRICER_BUYER_VERIFY_MODE.trim() || "strict",
     },
+    publicParsing: {
+      buyerAuthDisabled: isBuyerAuthDisabled(),
+      publicOnly: isPublicOnlyWalletParse(),
+      walletParseMode: env.REPRICER_WALLET_PARSE_MODE,
+      walletDetailsMode: env.REPRICER_WALLET_DETAILS_MODE.trim() || "popup_first",
+    },
   };
 }
 
@@ -84,6 +91,9 @@ export async function buildExtendedDashboardPayload() {
       lastMonitorParseStats = null;
     }
   }
+  const sppCookiesOn = !["0", "false", "no", "off"].includes(
+    env.REPRICER_MONITOR_SPP_VIA_COOKIES.trim().toLowerCase(),
+  );
   const [
     statusBase,
     belowMin,
@@ -94,6 +104,8 @@ export async function buildExtendedDashboardPayload() {
     zeroStock,
     lowStock,
     lastCatalogSync,
+    safeHoldCount,
+    lastGoodSample,
   ] = await Promise.all([
     buildSellerStatusPayload(),
     prisma.wbProduct.count({ where: { lastEvaluationStatus: "below_min" } }),
@@ -113,9 +125,31 @@ export async function buildExtendedDashboardPayload() {
       where: { scope: "all", status: "done" },
       orderBy: { finishedAt: "desc" },
     }),
+    prisma.wbProduct.count({ where: { safeModeHold: true } }),
+    prisma.wbProduct.findFirst({
+      where: { walletRubLastGood: { not: null } },
+      orderBy: { walletRubLastGoodAt: "desc" },
+      select: {
+        nmId: true,
+        walletRubLastGood: true,
+        walletRubLastGoodAt: true,
+        sourceLastGood: true,
+        parseStatusLastGood: true,
+        safeModeHold: true,
+      },
+    }),
   ]);
   return {
     ...statusBase,
+    publicWalletParse: {
+      buyerAuthDisabled: isBuyerAuthDisabled(),
+      publicOnly: isPublicOnlyWalletParse(),
+      walletParseMode: env.REPRICER_WALLET_PARSE_MODE,
+      walletDetailsMode: env.REPRICER_WALLET_DETAILS_MODE,
+      monitorSppViaCookies: sppCookiesOn && !isBuyerAuthDisabled(),
+      safeModeHoldProducts: safeHoldCount,
+      lastKnownGoodSample: lastGoodSample,
+    },
     stats: {
       belowMinCount: belowMin,
       parseFailedCount: parseFailed,

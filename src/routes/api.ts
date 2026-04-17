@@ -62,6 +62,11 @@ import {
 } from "../modules/buyerSession/buyerSessionManager.js";
 import { resolveWalletDomBrowserKind } from "../modules/wbBuyerDom/runWalletCli.js";
 import { getWbWalletPrice } from "../walletDom/wbWalletPriceParser.js";
+import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
+import {
+  createEphemeralWalletProfileDir,
+  removeEphemeralWalletProfileDir,
+} from "../lib/ephemeralWalletProfile.js";
 
 function parseQueryLimit(raw: string | undefined, fallback: number, cap: number): number {
   const n = Number(raw);
@@ -73,6 +78,14 @@ function parseQueryOffset(raw: string | undefined): number {
   const n = Number(raw);
   if (!Number.isFinite(n) || n < 0) return 0;
   return Math.floor(n);
+}
+
+function buyerAuthDisabledBody() {
+  return {
+    ok: false as const,
+    error: "Buyer authorization paths are disabled (set REPRICER_DISABLE_BUYER_AUTH=false to enable legacy flow).",
+    code: "buyer_auth_disabled" as const,
+  };
 }
 
 const qTrimmedOptional = z.preprocess((v) => {
@@ -187,7 +200,10 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.post("/api/settings/buyer-session/login/start", async () => {
+  app.post("/api/settings/buyer-session/login/start", async (_req, reply) => {
+    if (isBuyerAuthDisabled()) {
+      return reply.code(410).send(buyerAuthDisabledBody());
+    }
     const headedOk = headedBrowserLoginEnvironmentOk();
     const profileDir = resolveBuyerProfileDir();
     const session = await prisma.buyerSession.create({
@@ -256,6 +272,9 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: { sessionId?: string } }>(
     "/api/settings/buyer-session/login/finish",
     async (req, reply) => {
+      if (isBuyerAuthDisabled()) {
+        return reply.code(410).send(buyerAuthDisabledBody());
+      }
       const id = req.body?.sessionId?.trim();
       if (!id) return reply.code(400).send({ error: "sessionId required" });
       try {
@@ -283,6 +302,9 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
    * Тело: полный JSON как в файле REPRICER_WB_STORAGE_STATE_PATH.
    */
   app.post("/api/settings/buyer-session/import-storage-state", async (req, reply) => {
+    if (isBuyerAuthDisabled()) {
+      return reply.code(410).send(buyerAuthDisabledBody());
+    }
     const result = await importBuyerStorageStateFromJson(req.body ?? null);
     if (!result.ok) {
       return reply.code(400).send({ ok: false, error: result.message });
@@ -292,6 +314,9 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
 
   /** ZIP архива каталога Chromium `.wb-browser-profile` (локальный логин + загрузка на VPS). */
   app.post("/api/settings/buyer-session/import-profile-archive", async (req, reply) => {
+    if (isBuyerAuthDisabled()) {
+      return reply.code(410).send(buyerAuthDisabledBody());
+    }
     const f = await req.file();
     if (!f) {
       return reply.code(400).send({ ok: false, error: "Ожидается multipart поле file с zip-архивом профиля" });
@@ -316,24 +341,38 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: "Укажите nmId в JSON: { \"nmId\": 123 }" });
     }
     const spp =
+      !isBuyerAuthDisabled() &&
       !(
         env.REPRICER_MONITOR_SPP_VIA_COOKIES.trim().toLowerCase() === "0" ||
         env.REPRICER_MONITOR_SPP_VIA_COOKIES.trim().toLowerCase() === "false" ||
         env.REPRICER_MONITOR_SPP_VIA_COOKIES.trim().toLowerCase() === "no"
       );
+    let probeProfileDir = resolveBuyerProfileDir();
+    let ephemeralProbeDir: string | null = null;
+    if (isBuyerAuthDisabled()) {
+      ephemeralProbeDir = createEphemeralWalletProfileDir();
+      probeProfileDir = ephemeralProbeDir;
+      logger.info({ nmId, tag: "parse-probe-public" }, "public parse started — ephemeral profile");
+    }
     try {
       const result = await getWbWalletPrice({
         nmId,
-        userDataDir: resolveBuyerProfileDir(),
+        userDataDir: probeProfileDir,
         headless: true,
         browser: resolveWalletDomBrowserKind(),
         fetchShowcaseWithCookies: spp,
       });
+      const okParse =
+        result.parseStatus !== "parse_failed" &&
+        result.parseStatus !== "auth_required" &&
+        result.parseStatus !== "blocked_or_captcha";
+      if (result.priceParseSource === "popup_dom") {
+        logger.info({ nmId, tag: "parse-probe-public" }, "popup parse success");
+      } else if (result.priceParseSource === "public_dom") {
+        logger.info({ nmId, tag: "parse-probe-public" }, "public dom parsed");
+      }
       return {
-        ok:
-          result.parseStatus !== "parse_failed" &&
-          result.parseStatus !== "auth_required" &&
-          result.parseStatus !== "blocked_or_captcha",
+        ok: okParse,
         parseStatus: result.parseStatus,
         priceParseSource: result.priceParseSource ?? null,
         nmId: result.nmId,
@@ -343,8 +382,102 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      logger.warn({ nmId, tag: "parse-probe-public", err: msg }, "parse failed");
       return reply.code(500).send({ ok: false, error: msg });
+    } finally {
+      if (ephemeralProbeDir) {
+        removeEphemeralWalletProfileDir(ephemeralProbeDir);
+      }
     }
+  });
+
+  /** Сводка публичного парсинга и safe mode (без buyer-session). */
+  app.get("/api/public-parse/status", async () => {
+    const lastMonitor = await prisma.syncJob.findFirst({
+      where: { type: "monitor" },
+      orderBy: { startedAt: "desc" },
+    });
+    let parseStats: Record<string, unknown> | null = null;
+    let processedProducts: unknown = null;
+    if (lastMonitor?.meta) {
+      try {
+        const m = JSON.parse(lastMonitor.meta) as {
+          parseStats?: Record<string, unknown>;
+          processedProducts?: unknown;
+        };
+        parseStats = (m.parseStats as Record<string, unknown>) ?? null;
+        processedProducts = m.processedProducts ?? null;
+      } catch {
+        parseStats = null;
+      }
+    }
+    const stats = parseStats as {
+      publicDom?: number;
+      popupDom?: number;
+      unknown?: number;
+      authWall?: number;
+      captcha?: number;
+      safeModeLastGood?: number;
+    } | null;
+    const safeHoldCount = await prisma.wbProduct.count({ where: { safeModeHold: true } });
+    const lastGoodSample = await prisma.wbProduct.findFirst({
+      where: { walletRubLastGood: { not: null } },
+      orderBy: { walletRubLastGoodAt: "desc" },
+      select: {
+        nmId: true,
+        walletRubLastGood: true,
+        walletRubLastGoodAt: true,
+        sourceLastGood: true,
+        parseStatusLastGood: true,
+        safeModeHold: true,
+      },
+    });
+    const stepsTotal =
+      stats &&
+      typeof stats.publicDom === "number" &&
+      typeof stats.popupDom === "number" &&
+      typeof stats.unknown === "number"
+        ? stats.publicDom + stats.popupDom + stats.unknown
+        : null;
+    return {
+      buyerAuthDisabled: isBuyerAuthDisabled(),
+      publicOnly: isPublicOnlyWalletParse(),
+      env: {
+        REPRICER_DISABLE_BUYER_AUTH: env.REPRICER_DISABLE_BUYER_AUTH,
+        REPRICER_WALLET_PARSE_MODE: env.REPRICER_WALLET_PARSE_MODE,
+        REPRICER_WALLET_DETAILS_MODE: env.REPRICER_WALLET_DETAILS_MODE,
+        REPRICER_MONITOR_SPP_VIA_COOKIES: env.REPRICER_MONITOR_SPP_VIA_COOKIES,
+      },
+      lastMonitorJob: lastMonitor
+        ? {
+            id: lastMonitor.id,
+            status: lastMonitor.status,
+            startedAt: lastMonitor.startedAt.toISOString(),
+            finishedAt: lastMonitor.finishedAt?.toISOString() ?? null,
+            processedProducts,
+          }
+        : null,
+      parseStats,
+      interpretation: stats
+        ? {
+            publicDomOk:
+              stepsTotal != null && stepsTotal > 0 ? (stats.publicDom ?? 0) > 0 : null,
+            popupParseOk:
+              stepsTotal != null && stepsTotal > 0 ? (stats.popupDom ?? 0) > 0 : null,
+            walletMarkersLikely:
+              stepsTotal != null && stepsTotal > 0
+                ? (stats.publicDom ?? 0) + (stats.popupDom ?? 0) > 0
+                : null,
+            parseSourceMix: stats,
+            confidenceNote:
+              "confidence по шагам — в detailJson снимков; здесь только счётчики доменов парсинга.",
+          }
+        : null,
+      safeMode: {
+        activeProducts: safeHoldCount,
+        lastKnownGood: lastGoodSample,
+      },
+    };
   });
 
   app.get("/api/settings/status", async () => buildSellerStatusPayload());
@@ -736,6 +869,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       buyer: ext.buyer,
       catalog: ext.catalog,
       protection: ext.protection,
+      publicWalletParse: ext.publicWalletParse,
     };
   });
 

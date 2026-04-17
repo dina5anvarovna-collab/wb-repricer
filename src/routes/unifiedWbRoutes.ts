@@ -23,6 +23,7 @@ import {
   headedBrowserLoginBlockedMessage,
   headedBrowserLoginEnvironmentOk,
 } from "../modules/buyerSession/buyerSessionManager.js";
+import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
 
 function parseLimit(raw: string | undefined, def: number, cap: number): number {
   const n = Number(raw);
@@ -49,14 +50,22 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
       verifyMode === "public_first" ||
       walletMode.startsWith("public_then") ||
       walletMode === "public";
-    const needsBuyerLogin = publicFirstPolicy
+    const buyerAuthDisabled = isBuyerAuthDisabled();
+    const publicOnly = isPublicOnlyWalletParse();
+    const needsBuyerLogin = buyerAuthDisabled
       ? false
-      : overview.buyerBrowser.cookieFileExists
-        ? !cookieAlive
-        : true;
+      : publicFirstPolicy
+        ? false
+        : overview.buyerBrowser.cookieFileExists
+          ? !cookieAlive
+          : true;
     let message: string | null = null;
     if (!tokenAlive && auth) {
       message = "Сессия Seller API (токен) отклонена WB — обновите токен в «Подключение WB».";
+    } else if (buyerAuthDisabled) {
+      message = publicOnly
+        ? "Режим только публичного парсинга (REPRICER_DISABLE_BUYER_AUTH): витрина и popup без buyer-login и cookies."
+        : null;
     } else if (!cookieAlive && !publicFirstPolicy) {
       message =
         "Сессия браузера (витрина) не подтверждена — «Обновить авторизацию» или вход через CLI.";
@@ -76,6 +85,16 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
         walletParseMode: env.REPRICER_WALLET_PARSE_MODE,
         buyerVerifyMode: env.REPRICER_BUYER_VERIFY_MODE.trim() || "strict",
       },
+      publicParsing: {
+        buyerAuthDisabled,
+        publicOnly,
+        walletParseMode: env.REPRICER_WALLET_PARSE_MODE.trim(),
+        walletDetailsMode: env.REPRICER_WALLET_DETAILS_MODE.trim() || "popup_first",
+        monitorSppViaCookies:
+          buyerAuthDisabled
+            ? false
+            : !["0", "false", "no", "off"].includes(env.REPRICER_MONITOR_SPP_VIA_COOKIES.trim().toLowerCase()),
+      },
       needsBuyerLogin,
       message,
     };
@@ -87,16 +106,34 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
     const { header } = await getValidCookies();
     const cookieOk = header ? await isBrowserCookieSessionAlive(header) : false;
     const tokenOk = auth ? await isSellerApiSessionAlive(auth.token) : false;
-    return { ok: tokenOk || cookieOk, sellerTokenOk: tokenOk, buyerCookieOk: cookieOk };
+    return {
+      ok: isBuyerAuthDisabled() ? tokenOk : tokenOk || cookieOk,
+      sellerTokenOk: tokenOk,
+      buyerCookieOk: cookieOk,
+    };
   });
 
-  app.post<{ Body: { headed?: boolean } }>("/api/auth/refresh", async (req) => {
+  app.post<{ Body: { headed?: boolean } }>("/api/auth/refresh", async (req, reply) => {
+    if (isBuyerAuthDisabled()) {
+      return reply.code(410).send({
+        ok: false,
+        message: "Buyer cookies refresh disabled (REPRICER_DISABLE_BUYER_AUTH).",
+        code: "buyer_auth_disabled",
+      });
+    }
     const headed = req.body?.headed === true;
     const r = await refreshSessionIfNeeded({ headed, force: true });
     return { ok: r.ok, message: r.message };
   });
 
-  app.post("/api/auth/login/start", async () => {
+  app.post("/api/auth/login/start", async (req, reply) => {
+    if (isBuyerAuthDisabled()) {
+      return reply.code(410).send({
+        ok: false,
+        message: "Buyer CLI login disabled (REPRICER_DISABLE_BUYER_AUTH). Use public parsing only.",
+        code: "buyer_auth_disabled",
+      });
+    }
     const profileDir = resolveBuyerProfileDir();
     const projectRoot = path.isAbsolute(env.REPRICER_WALLET_PROJECT_ROOT)
       ? env.REPRICER_WALLET_PROJECT_ROOT

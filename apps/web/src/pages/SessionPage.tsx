@@ -8,6 +8,14 @@ type ParsePolicy = {
   buyerVerifyMode: string;
 };
 
+type PublicParsingEnv = {
+  buyerAuthDisabled: boolean;
+  publicOnly: boolean;
+  walletParseMode?: string;
+  walletDetailsMode: string;
+  monitorSppViaCookies: boolean;
+};
+
 type AuthStatus = {
   sellerApi: { status: string; lastValidatedAt: string | null; lastError: string | null };
   buyerBrowser: {
@@ -21,7 +29,50 @@ type AuthStatus = {
   needsBuyerLogin: boolean;
   message: string | null;
   parsePolicy?: ParsePolicy;
+  publicParsing?: PublicParsingEnv;
 };
+
+type PublicParseStatusPayload = {
+  buyerAuthDisabled: boolean;
+  publicOnly: boolean;
+  env: Record<string, string>;
+  lastMonitorJob: {
+    id: string;
+    status: string;
+    startedAt: string;
+    finishedAt: string | null;
+    processedProducts: unknown;
+  } | null;
+  parseStats: Record<string, number> | null;
+  interpretation: {
+    publicDomOk: boolean | null;
+    popupParseOk: boolean | null;
+    walletMarkersLikely: boolean | null;
+    parseSourceMix: Record<string, unknown>;
+    confidenceNote: string;
+  } | null;
+  safeMode: {
+    activeProducts: number;
+    lastKnownGood: {
+      nmId: number;
+      walletRubLastGood: number | null;
+      walletRubLastGoodAt: string | null;
+      sourceLastGood: string | null;
+      parseStatusLastGood: string | null;
+      safeModeHold: boolean;
+    } | null;
+  };
+};
+
+function yn(v: boolean | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return v ? "YES" : "NO";
+}
+
+function okfail(v: boolean | null | undefined): string {
+  if (v === null || v === undefined) return "—";
+  return v ? "OK" : "FAIL";
+}
 
 export function SessionPage() {
   const qc = useQueryClient();
@@ -29,6 +80,11 @@ export function SessionPage() {
   const q = useQuery({
     queryKey: ["auth-status"],
     queryFn: () => apiFetch<AuthStatus>("/api/auth/status"),
+  });
+
+  const pub = useQuery({
+    queryKey: ["public-parse-status"],
+    queryFn: () => apiFetch<PublicParseStatusPayload>("/api/public-parse/status"),
   });
 
   const checkM = useMutation({
@@ -104,6 +160,7 @@ export function SessionPage() {
         method: "POST",
         json: { nmId },
       }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["public-parse-status"] }),
   });
 
   if (q.isLoading) {
@@ -113,16 +170,35 @@ export function SessionPage() {
     return <p className="text-red-400">{(q.error as Error).message}</p>;
   }
   const d = q.data!;
+  const ppolicy = d.publicParsing ?? d.parsePolicy;
+  const buyerOff = d.publicParsing?.buyerAuthDisabled ?? false;
   const pp = d.parsePolicy;
+
+  const interpretation = pub.data?.interpretation;
+  const stats = pub.data?.parseStats;
+  const mix = interpretation?.parseSourceMix as Record<string, number> | undefined;
+  const confidence =
+    mix && typeof stats?.publicDom === "number"
+      ? Math.min(
+          1,
+          ((stats.publicDom ?? 0) + (stats.popupDom ?? 0)) /
+            Math.max(1, (stats.publicDom ?? 0) + (stats.popupDom ?? 0) + (stats.unknown ?? 0)),
+        )
+      : null;
 
   return (
     <div className="mx-auto max-w-3xl space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold text-white">Авторизация WB</h1>
+        <h1 className="text-2xl font-semibold text-white">Парсинг и доступы WB</h1>
         <p className="mt-1 text-sm text-[#8b93a7]">
-          Seller API нужен для каталога и цен в кабинете. Витрина и WB Кошелёк парсятся в режиме{" "}
-          <strong className="text-[#c4c9d4]">public-first</strong>: сначала публичная карточка и popup
-          детализации; buyer-session и cookies — только fallback.
+          Seller API нужен для каталога и цен кабинета. Цена WB Кошелька берётся с{" "}
+          <strong className="text-[#c4c9d4]">публичной карточки</strong> и при необходимости из{" "}
+          <strong className="text-[#c4c9d4]">popup детализации</strong>
+          {buyerOff ? (
+            <> — режим без buyer-login и без cookies ({d.parsePolicy?.walletParseMode ?? "public_only"}).</>
+          ) : (
+            <> (legacy: опционально buyer-session как fallback).</>
+          )}
         </p>
       </div>
 
@@ -131,16 +207,23 @@ export function SessionPage() {
           <h2 className="text-sm font-medium text-white">Стратегия парсинга (.env)</h2>
           <ul className="mt-2 space-y-1 text-xs">
             <li>
-              Режим:{" "}
-              <code className="rounded bg-[#252a33] px-1">{pp.walletParseMode}</code> · verify:{" "}
+              Режим: <code className="rounded bg-[#252a33] px-1">{pp.walletParseMode}</code> · verify:{" "}
               <code className="rounded bg-[#252a33] px-1">{pp.buyerVerifyMode}</code>
             </li>
             <li>
-              Public-first активен:{" "}
+              Public-first (legacy поле):{" "}
               <span className={pp.publicFirst ? "text-emerald-300" : "text-amber-200"}>
                 {pp.publicFirst ? "да" : "нет"}
               </span>
             </li>
+            {ppolicy && "walletDetailsMode" in ppolicy ? (
+              <li>
+                Детали цены (popup):{" "}
+                <code className="rounded bg-[#252a33] px-1">
+                  {(ppolicy as PublicParsingEnv).walletDetailsMode}
+                </code>
+              </li>
+            ) : null}
           </ul>
         </div>
       ) : null}
@@ -148,7 +231,7 @@ export function SessionPage() {
       {d.message ? (
         <div
           className={`rounded-xl border px-4 py-3 text-sm ${
-            pp?.publicFirst && !d.checks.buyerCookieProbe
+            buyerOff || (pp?.publicFirst && !d.checks.buyerCookieProbe)
               ? "border-[#252a33] bg-[#1a1f28] text-[#c4c9d4]"
               : "border-amber-500/35 bg-amber-500/10 text-amber-100"
           }`}
@@ -156,6 +239,69 @@ export function SessionPage() {
           {d.message}
         </div>
       ) : null}
+
+      <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
+        <h2 className="text-sm font-medium text-white">Публичный парсинг WB</h2>
+        <ul className="mt-3 space-y-1.5 text-sm text-[#c4c9d4]">
+          <li>
+            Public DOM (последний мониторинг):{" "}
+            <span className="tabular-nums text-white">{okfail(interpretation?.publicDomOk ?? null)}</span>
+          </li>
+          <li>
+            Popup parse:{" "}
+            <span className="tabular-nums text-white">{okfail(interpretation?.popupParseOk ?? null)}</span>
+          </li>
+          <li>
+            Wallet detected (по шагам с DOM/popup):{" "}
+            <span className="tabular-nums text-white">{yn(interpretation?.walletMarkersLikely)}</span>
+          </li>
+          <li>
+            Parse source mix:{" "}
+            <span className="text-xs text-[#8b93a7]">
+              public_dom={stats?.publicDom ?? "—"}, popup_dom={stats?.popupDom ?? "—"}, unknown=
+              {stats?.unknown ?? "—"}
+            </span>
+          </li>
+          <li>
+            Confidence (оценка доли успешных доменов):{" "}
+            <span className="tabular-nums text-white">
+              {confidence != null ? confidence.toFixed(2) : "—"}
+            </span>
+          </li>
+          <li>
+            Last success at (job):{" "}
+            <span className="text-white">
+              {pub.data?.lastMonitorJob?.finishedAt
+                ? new Date(pub.data.lastMonitorJob.finishedAt).toLocaleString("ru-RU")
+                : pub.data?.lastMonitorJob?.startedAt
+                  ? new Date(pub.data.lastMonitorJob.startedAt).toLocaleString("ru-RU")
+                  : "—"}
+            </span>
+          </li>
+          <li>
+            Last known good value:{" "}
+            <span className="text-white">
+              {pub.data?.safeMode.lastKnownGood?.walletRubLastGood != null
+                ? `${Math.round(pub.data.safeMode.lastKnownGood.walletRubLastGood)} ₽`
+                : "—"}
+              {pub.data?.safeMode.lastKnownGood?.walletRubLastGoodAt
+                ? ` · ${new Date(pub.data.safeMode.lastKnownGood.walletRubLastGoodAt).toLocaleString("ru-RU")}`
+                : ""}
+            </span>
+          </li>
+          <li>
+            Safe mode active (товары):{" "}
+            <span className={pub.data?.safeMode.activeProducts ? "text-amber-200" : "text-emerald-300"}>
+              {pub.data?.safeMode.activeProducts ? "YES" : "NO"}
+              {pub.data?.safeMode.activeProducts ? ` (${pub.data.safeMode.activeProducts} шт.)` : ""}
+            </span>
+          </li>
+        </ul>
+        {pub.isLoading ? <p className="mt-2 text-xs text-[#8b93a7]">Загрузка сводки…</p> : null}
+        {interpretation?.confidenceNote ? (
+          <p className="mt-2 text-xs text-[#8b93a7]">{interpretation.confidenceNote}</p>
+        ) : null}
+      </div>
 
       <div className="grid gap-4 md:grid-cols-2">
         <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
@@ -167,58 +313,67 @@ export function SessionPage() {
             {d.sellerApi.lastError ? <li className="text-amber-200/90">Ошибка: {d.sellerApi.lastError}</li> : null}
           </ul>
         </div>
+
+        {!buyerOff ? (
+          <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
+            <h2 className="text-sm font-medium text-white">Buyer / cookies (legacy fallback)</h2>
+            <ul className="mt-3 space-y-1.5 text-sm text-[#c4c9d4]">
+              <li>Сессия в БД: {d.buyerBrowser.status}</li>
+              <li>
+                Cookies (файл):{" "}
+                {d.buyerBrowser.cookieFileExists ? (
+                  <span className="text-emerald-300">PRESENT</span>
+                ) : (
+                  <span className="text-[#8b93a7]">нет</span>
+                )}
+              </li>
+              <li>
+                Probe главной WB:{" "}
+                {d.checks.buyerCookieProbe ? (
+                  <span className="text-emerald-300">OK</span>
+                ) : (
+                  <span className="text-amber-200">FAIL / истекло</span>
+                )}
+              </li>
+              <li>
+                Обязательный buyer-login (UI):{" "}
+                <span className={d.needsBuyerLogin ? "text-amber-200" : "text-emerald-300"}>
+                  {d.needsBuyerLogin ? "да" : "нет"}
+                </span>
+              </li>
+              <li className="break-all text-xs text-[#8b93a7]">Профиль: {d.buyerBrowser.profileDir}</li>
+              <li className="break-all text-xs text-[#8b93a7]">
+                storageState: {d.buyerBrowser.storageStatePath}
+              </li>
+            </ul>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
+            <h2 className="text-sm font-medium text-white">Buyer / cookies</h2>
+            <p className="mt-2 text-sm text-[#8b93a7]">
+              Отключено в конфигурации (<code className="text-[#c4c9d4]">REPRICER_DISABLE_BUYER_AUTH</code>).
+              Мониторинг использует эфемерный профиль браузера без сохранённой buyer-сессии.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {!buyerOff ? (
         <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
-          <h2 className="text-sm font-medium text-white">Buyer / cookies (fallback)</h2>
-          <ul className="mt-3 space-y-1.5 text-sm text-[#c4c9d4]">
-            <li>Сессия в БД: {d.buyerBrowser.status}</li>
+          <h2 className="text-sm font-medium text-white">Источники цены (legacy)</h2>
+          <ul className="mt-2 space-y-1 text-xs text-[#8b93a7]">
             <li>
-              Cookies (файл):{" "}
-              {d.buyerBrowser.cookieFileExists ? (
-                <span className="text-emerald-300">PRESENT</span>
-              ) : (
-                <span className="text-[#8b93a7]">нет</span>
-              )}
+              <span className="text-[#c4c9d4]">Public витрина</span> — основной DOM карточки.
             </li>
             <li>
-              Probe главной WB:{" "}
-              {d.checks.buyerCookieProbe ? (
-                <span className="text-emerald-300">OK</span>
-              ) : (
-                <span className="text-amber-200">FAIL / истекло</span>
-              )}
+              <span className="text-[#c4c9d4]">Popup детализации</span> — по клику на цену (если не отключено в .env).
             </li>
             <li>
-              Обязательный buyer-login (UI):{" "}
-              <span className={d.needsBuyerLogin ? "text-amber-200" : "text-emerald-300"}>
-                {d.needsBuyerLogin ? "да" : "нет"}
-              </span>
-            </li>
-            <li className="break-all text-xs text-[#8b93a7]">Профиль: {d.buyerBrowser.profileDir}</li>
-            <li className="break-all text-xs text-[#8b93a7]">
-              storageState: {d.buyerBrowser.storageStatePath}
+              <span className="text-[#c4c9d4]">Cookies / card.wb.ru</span> — опционально при включённом buyer auth.
             </li>
           </ul>
         </div>
-      </div>
-
-      <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
-        <h2 className="text-sm font-medium text-white">Источники цены (концепция)</h2>
-        <ul className="mt-2 space-y-1 text-xs text-[#8b93a7]">
-          <li>
-            <span className="text-[#c4c9d4]">Public витрина</span> — основной DOM карточки без обязательного входа.
-          </li>
-          <li>
-            <span className="text-[#c4c9d4]">Popup детализации</span> — клик по цене, если включено (не
-            REPRICER_WALLET_SKIP_PRICE_DETAILS_MODAL).
-          </li>
-          <li>
-            <span className="text-[#c4c9d4]">Cookies fallback</span> — card.wb.ru / storageState при слабом DOM.
-          </li>
-          <li>
-            <span className="text-[#c4c9d4]">Buyer session</span> — архив профиля или CLI-логин при auth wall (редко).
-          </li>
-        </ul>
-      </div>
+      ) : null}
 
       <div className="flex flex-wrap gap-2">
         <button
@@ -227,37 +382,41 @@ export function SessionPage() {
           onClick={() => checkM.mutate()}
           className="rounded-lg bg-[#252a33] px-4 py-2 text-sm text-white hover:bg-[#2f3642] disabled:opacity-40"
         >
-          Проверить сессии
+          Проверить Seller API
         </button>
-        <button
-          type="button"
-          disabled={refreshM.isPending}
-          onClick={() => refreshM.mutate(false)}
-          className="rounded-lg bg-blue-600/85 px-4 py-2 text-sm text-white hover:bg-blue-600 disabled:opacity-40"
-        >
-          Обновить cookies (фон)
-        </button>
-        <button
-          type="button"
-          disabled={refreshM.isPending}
-          onClick={() => refreshM.mutate(true)}
-          className="rounded-lg border border-blue-500/50 px-4 py-2 text-sm text-blue-200 hover:bg-blue-500/10 disabled:opacity-40"
-        >
-          Обновить buyer (окно)
-        </button>
-        <button
-          type="button"
-          disabled={loginStartM.isPending}
-          onClick={() => loginStartM.mutate()}
-          className="rounded-lg border border-[#3d4654] px-4 py-2 text-sm text-[#c4c9d4] hover:bg-white/5 disabled:opacity-40"
-        >
-          Обновить buyer session (CLI команда)
-        </button>
+        {!buyerOff ? (
+          <>
+            <button
+              type="button"
+              disabled={refreshM.isPending}
+              onClick={() => refreshM.mutate(false)}
+              className="rounded-lg bg-blue-600/85 px-4 py-2 text-sm text-white hover:bg-blue-600 disabled:opacity-40"
+            >
+              Обновить cookies (фон)
+            </button>
+            <button
+              type="button"
+              disabled={refreshM.isPending}
+              onClick={() => refreshM.mutate(true)}
+              className="rounded-lg border border-blue-500/50 px-4 py-2 text-sm text-blue-200 hover:bg-blue-500/10 disabled:opacity-40"
+            >
+              Обновить buyer (окно)
+            </button>
+            <button
+              type="button"
+              disabled={loginStartM.isPending}
+              onClick={() => loginStartM.mutate()}
+              className="rounded-lg border border-[#3d4654] px-4 py-2 text-sm text-[#c4c9d4] hover:bg-white/5 disabled:opacity-40"
+            >
+              CLI buyer login
+            </button>
+          </>
+        ) : null}
       </div>
 
       <div className="flex flex-wrap items-end gap-3 rounded-xl border border-[#252a33] bg-[#0c0e12] p-4">
         <div>
-          <label className="block text-xs text-[#8b93a7]">Проверить public parse (nmId)</label>
+          <label className="block text-xs text-[#8b93a7]">Проба public parse (nmId)</label>
           <input
             className="mt-1 w-40 rounded border border-[#252a33] bg-[#13161c] px-2 py-1 text-sm text-white"
             value={probeNmId}
@@ -284,53 +443,57 @@ export function SessionPage() {
         </pre>
       ) : null}
 
-      <div className="space-y-2 rounded-xl border border-[#252a33] bg-[#0c0e12] p-4">
-        <p className="text-sm text-[#c4c9d4]">Импорт storageState (JSON)</p>
-        <input
-          type="file"
-          accept="application/json,.json"
-          className="text-xs text-[#8b93a7]"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) importStorageM.mutate(f);
-            e.target.value = "";
-          }}
-        />
-        {importStorageM.isSuccess ? (
-          <p className="text-xs text-emerald-300">{(importStorageM.data as { message?: string }).message}</p>
-        ) : null}
-        {importStorageM.isError ? (
-          <p className="text-xs text-red-300">{(importStorageM.error as Error).message}</p>
-        ) : null}
-      </div>
+      {!buyerOff ? (
+        <>
+          <div className="space-y-2 rounded-xl border border-[#252a33] bg-[#0c0e12] p-4">
+            <p className="text-sm text-[#c4c9d4]">Импорт storageState (JSON)</p>
+            <input
+              type="file"
+              accept="application/json,.json"
+              className="text-xs text-[#8b93a7]"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) importStorageM.mutate(f);
+                e.target.value = "";
+              }}
+            />
+            {importStorageM.isSuccess ? (
+              <p className="text-xs text-emerald-300">{(importStorageM.data as { message?: string }).message}</p>
+            ) : null}
+            {importStorageM.isError ? (
+              <p className="text-xs text-red-300">{(importStorageM.error as Error).message}</p>
+            ) : null}
+          </div>
 
-      <div className="space-y-2 rounded-xl border border-[#252a33] bg-[#0c0e12] p-4">
-        <p className="text-sm text-[#c4c9d4]">Импорт архива профиля браузера (.zip)</p>
-        <input
-          type="file"
-          accept=".zip,application/zip"
-          className="text-xs text-[#8b93a7]"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) profileZipM.mutate(f);
-            e.target.value = "";
-          }}
-        />
-        {profileZipM.isSuccess ? (
-          <p className="text-xs text-emerald-300">{(profileZipM.data as { message?: string }).message}</p>
-        ) : null}
-        {profileZipM.isError ? (
-          <p className="text-xs text-red-300">{(profileZipM.error as Error).message}</p>
-        ) : null}
-      </div>
+          <div className="space-y-2 rounded-xl border border-[#252a33] bg-[#0c0e12] p-4">
+            <p className="text-sm text-[#c4c9d4]">Импорт архива профиля браузера (.zip)</p>
+            <input
+              type="file"
+              accept=".zip,application/zip"
+              className="text-xs text-[#8b93a7]"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) profileZipM.mutate(f);
+                e.target.value = "";
+              }}
+            />
+            {profileZipM.isSuccess ? (
+              <p className="text-xs text-emerald-300">{(profileZipM.data as { message?: string }).message}</p>
+            ) : null}
+            {profileZipM.isError ? (
+              <p className="text-xs text-red-300">{(profileZipM.error as Error).message}</p>
+            ) : null}
+          </div>
+        </>
+      ) : null}
 
-      {refreshM.data ? (
+      {refreshM.data && !buyerOff ? (
         <p className={`text-sm ${refreshM.data.ok ? "text-emerald-300" : "text-red-300"}`}>
           {refreshM.data.message}
         </p>
       ) : null}
 
-      {loginStartM.data ? (
+      {loginStartM.data && !buyerOff ? (
         <div className="rounded-xl border border-[#252a33] bg-[#0c0e12] p-4 text-sm text-[#c4c9d4]">
           {loginStartM.data.headedLoginAvailable === false ? (
             <p className="mb-2 text-amber-100">{loginStartM.data.headedLoginNote}</p>

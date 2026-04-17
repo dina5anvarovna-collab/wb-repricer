@@ -105,10 +105,16 @@ const schema = z.object({
    */
   REPRICER_WALLET_SKIP_PRICE_DETAILS_MODAL: z.string().optional().default(""),
   /**
-   * Как использовать источники цены WB Кошелька / витрины:
-   * public_then_cookies — сначала публичный DOM (и popup), затем cookies/card.wb.ru как усиление (рекомендуется для VPS).
+   * public_only — только публичная карточка + popup (без buyer/cookies/card API).
+   * legacy: public_then_cookies — усиление через card при включённом buyer auth.
    */
-  REPRICER_WALLET_PARSE_MODE: z.string().optional().default("public_then_cookies"),
+  REPRICER_WALLET_PARSE_MODE: z.string().optional().default("public_only"),
+  /** popup_first — по возможности раньше открывать детализацию цены (флаг для парсера). */
+  REPRICER_WALLET_DETAILS_MODE: z.string().optional().default("popup_first"),
+  /**
+   * true (по умолчанию) — отключить buyer login, storageState, cookies refresh, card.wb.ru как часть основного контура.
+   */
+  REPRICER_DISABLE_BUYER_AUTH: z.string().optional().default("true"),
   /** TTL блокировки джоб монитор/enforce (мин). После истечения lock можно захватить снова (после падения процесса). */
   REPRICER_SCHEDULER_LOCK_TTL_MIN: z.coerce.number().min(5).max(720).default(90),
   /**
@@ -135,7 +141,8 @@ const schema = z.object({
    * СПП/витрина: после wallet DOM — контур card.wb.ru с куками профиля.
    * Независим от REPRICER_MONITOR_WALLET_BATCH (batch и spawn CLI получают showcase при true).
    */
-  REPRICER_MONITOR_SPP_VIA_COOKIES: z.string().optional().default("true"),
+  /** В public_only обычно false — без кук покупателя нет смысла дергать card.wb.ru. */
+  REPRICER_MONITOR_SPP_VIA_COOKIES: z.string().optional().default("false"),
   /** Сколько полных циклов ретраев card.wb.ru (v2+v4) на один nm при fallback */
   REPRICER_MONITOR_CARD_API_MAX_ATTEMPTS: z.coerce.number().min(1).max(6).default(3),
   /** Файл storageState (cookies) для axios/витрины; обновляется refreshSession / Playwright */

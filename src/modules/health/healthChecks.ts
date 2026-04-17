@@ -4,6 +4,7 @@ import { prisma } from "../../lib/prisma.js";
 import { runtimePaths } from "../../lib/runtimePaths.js";
 import { loadSavedSession } from "../buyerSession/buyerStorageIo.js";
 import { env } from "../../config/env.js";
+import { isBuyerAuthDisabled } from "../../lib/repricerMode.js";
 
 function envTruthy(v: string): boolean {
   const t = v.trim().toLowerCase();
@@ -64,6 +65,19 @@ export async function healthBuyerSession(): Promise<{
   validation: "fresh" | "stale" | "missing";
   reason?: string;
 }> {
+  if (isBuyerAuthDisabled()) {
+    return {
+      ok: true,
+      buyerReady: true,
+      active: false,
+      hasSavedState: false,
+      profileDir: runtimePaths.buyerProfileDir,
+      statePath: runtimePaths.buyerStatePath,
+      lastValidatedAt: null,
+      validation: "missing",
+      reason: "public_only_buyer_auth_disabled",
+    };
+  }
   const buyer = await prisma.buyerSession.findFirst({
     where: { isAuthorized: true, status: "active" },
     orderBy: { updatedAt: "desc" },

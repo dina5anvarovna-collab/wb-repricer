@@ -77,6 +77,13 @@ model WbProduct {
   /** Откуда взяты последние сохранённые цены: dom | fallback_cache | fallback_cabinet | mixed */
   lastPriceSource            String?
   lastPriceSeenAt            DateTime?
+  /** Последняя успешная цена WB Кошелька (public DOM / popup), для safe mode при сбое парсинга */
+  walletRubLastGood          Float?
+  walletRubLastGoodAt        DateTime?
+  sourceLastGood             String?
+  parseStatusLastGood        String?
+  /** Парсинг не дал цену — удерживаем цену, не понижаем агрессивно */
+  safeModeHold               Boolean  @default(false)
   updatedAt            DateTime @updatedAt
 
   cabinet         SellerCabinet        @relation(fields: [cabinetId], references: [id], onDelete: Cascade)

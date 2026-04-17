@@ -13,6 +13,11 @@ import { getWbWalletPriceBatch } from "../../walletDom/wbWalletPriceParser.js";
 import { resolveBuyerProfileDir } from "../catalogSync/syncCatalog.js";
 import { resolveStockLevel, type StockLevel } from "../../lib/stockLevel.js";
 import { prepareBuyerSessionForMonitor } from "../buyerSession/buyerSessionManager.js";
+import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../../lib/repricerMode.js";
+import {
+  createEphemeralWalletProfileDir,
+  removeEphemeralWalletProfileDir,
+} from "../../lib/ephemeralWalletProfile.js";
 import { resolveObservedBuyerPrices } from "../pricing/resolveObservedBuyerPrices.js";
 import {
   aggregateTrustedProductSnapshot,
@@ -107,12 +112,25 @@ export async function runPriceMonitorJob(opts: {
     data: { type: "monitor", status: "running", meta: JSON.stringify({ workerId: opts.workerId }) },
   });
 
+  let ephemeralProfileDir: string | null = null;
+
   try {
-    const session = await prisma.buyerSession.findFirst({
-      where: { status: "active", isAuthorized: true },
-      orderBy: { updatedAt: "desc" },
-    });
-    const profileDir = session?.profileDir ?? resolveBuyerProfileDir();
+    let session: Awaited<ReturnType<typeof prisma.buyerSession.findFirst>> = null;
+    let profileDir = resolveBuyerProfileDir();
+    if (isBuyerAuthDisabled()) {
+      ephemeralProfileDir = createEphemeralWalletProfileDir();
+      profileDir = ephemeralProfileDir;
+      logger.info(
+        { tag: "monitor-public-only", profileDir },
+        "public parse started — ephemeral browser profile (no buyer auth)",
+      );
+    } else {
+      session = await prisma.buyerSession.findFirst({
+        where: { status: "active", isAuthorized: true },
+        orderBy: { updatedAt: "desc" },
+      });
+      profileDir = session?.profileDir ?? resolveBuyerProfileDir();
+    }
     const regionDests = await getSelectedRegionDests();
     const envWalletDest = env.REPRICER_WALLET_DEST.trim() || null;
     /** Пустой список в настройках + REPRICER_WALLET_DEST → один проход с этим dest (иначе URL без dest = один склад для всех «регионов»). */
@@ -135,20 +153,22 @@ export async function runPriceMonitorJob(opts: {
       },
     });
 
-    await prepareBuyerSessionForMonitor();
+    if (!isBuyerAuthDisabled()) {
+      await prepareBuyerSessionForMonitor();
+    }
 
     const parseStats = {
       publicDom: 0,
-      detailPopupDom: 0,
-      cookiesFallback: 0,
+      popupDom: 0,
       unknown: 0,
       authWall: 0,
       captcha: 0,
+      safeModeLastGood: 0,
     };
 
     const stepsTotal = products.length * destList.length;
     const useWalletBatch = monitorUsesWalletBatch() && stepsTotal > 0;
-    const sppViaCookies = monitorSppViaCookies();
+    const sppViaCookies = monitorSppViaCookies() && !isBuyerAuthDisabled();
     logger.info(
       {
         products: products.length,
@@ -203,8 +223,7 @@ export async function runPriceMonitorJob(opts: {
       const parseMethod = dom.parseMethod ?? null;
       const tier = dom.priceParseSource ?? null;
       if (tier === "public_dom") parseStats.publicDom += 1;
-      else if (tier === "detail_popup_dom") parseStats.detailPopupDom += 1;
-      else if (tier === "cookies_fallback") parseStats.cookiesFallback += 1;
+      else if (tier === "popup_dom") parseStats.popupDom += 1;
       else parseStats.unknown += 1;
       if (parseStatus === "auth_required") parseStats.authWall += 1;
       if (parseStatus === "blocked_or_captcha") parseStats.captcha += 1;
@@ -230,18 +249,48 @@ export async function runPriceMonitorJob(opts: {
           lastWalletObservedRub: p.lastWalletObservedRub,
         },
       });
-      const buyerWallet = resolved.buyerWallet;
+      let buyerWallet = resolved.buyerWallet;
+      let showcaseRub = resolved.showcaseRub;
       const buyerRegular = resolved.buyerRegular;
+
+      const parseRecovered =
+        dom.success &&
+        showcaseRub != null &&
+        showcaseRub > 0 &&
+        parseStatus !== "parse_failed" &&
+        parseStatus !== "auth_required" &&
+        parseStatus !== "blocked_or_captcha";
+
+      let usedLastGoodFallback = false;
+      if (
+        isPublicOnlyWalletParse() &&
+        !parseRecovered &&
+        p.walletRubLastGood != null &&
+        Number.isFinite(p.walletRubLastGood) &&
+        p.walletRubLastGood > 0
+      ) {
+        usedLastGoodFallback = true;
+        showcaseRub = Math.round(p.walletRubLastGood);
+        buyerWallet = Math.round(p.walletRubLastGood);
+        parseStats.safeModeLastGood += 1;
+        logger.warn(
+          { nmId: p.nmId, tag: "public-parse", rub: showcaseRub },
+          "safe mode enabled — last known good wallet value used",
+        );
+      }
+
+      if (parseRecovered && isPublicOnlyWalletParse()) {
+        logger.info({ nmId: p.nmId, tag: "public-parse", parseStatus }, "public dom parsed — wallet/showcase recovered");
+      }
       const snapshotWalletSource = resolved.walletSource;
       const buyerRegularSource = resolved.buyerRegularSource;
       const fb = resolved.fallback;
       const { showcaseEff, cookieShowcase, apiWalletRub, domRegular, sppWoWallet } = resolved.signals;
-      const showcaseRub = resolved.showcaseRub;
       const priceWithoutWalletRub = resolved.priceWithoutWalletRub;
 
       const hardAuth =
         parseStatus === "auth_required" || parseStatus === "blocked_or_captcha";
-      const hasUsablePrice = resolved.hasUsablePrice;
+      const hasUsablePrice = resolved.hasUsablePrice || usedLastGoodFallback;
 
       const noShowcaseLive = showcaseRub == null;
       const noDomRegularSignal = domRegular == null && showcaseEff == null && buyerRegular == null;
@@ -316,7 +365,7 @@ export async function runPriceMonitorJob(opts: {
 
       const evaluationBase = deriveEvaluationStatus({
         targetRub,
-        domSuccess: dom.success,
+        domSuccess: dom.success || usedLastGoodFallback,
         parseStatus,
         buyerWallet,
         buyerRegular,
@@ -324,7 +373,7 @@ export async function runPriceMonitorJob(opts: {
         stockLevel,
         hasUsablePrice,
       });
-      const evaluationStatus =
+      let evaluationStatus =
         stockLevel === "IN_STOCK" &&
         dom.success &&
         !hardAuth &&
@@ -332,6 +381,9 @@ export async function runPriceMonitorJob(opts: {
         evaluationBase === "ok"
           ? "buyer_unverified"
           : evaluationBase;
+      if (usedLastGoodFallback) {
+        evaluationStatus = "wallet_source_unavailable_safe_hold";
+      }
 
       const sellerBasePriceRub =
         p.sellerPrice != null && Number.isFinite(p.sellerPrice) ? Math.round(p.sellerPrice) : null;
@@ -419,6 +471,9 @@ export async function runPriceMonitorJob(opts: {
         showcaseQueryDest: dom.showcaseQueryDest ?? null,
         uiNote:
           "Подпись доставки в шапке сайта (напр. район Москвы) — профиль покупателя; не равна складу WB. Склад смотрите в snapshotRegionDest / showcaseQueryDest.",
+        usedLastGoodFallback,
+        safeMode: usedLastGoodFallback,
+        publicOnly: isPublicOnlyWalletParse(),
       });
 
       await prisma.priceSnapshot.create({
@@ -470,13 +525,28 @@ export async function runPriceMonitorJob(opts: {
             lastWalletParseStatus: parseStatus,
             lastEvaluationStatus: evaluationStatus,
             ...(stockLevel === "IN_STOCK" ? { lastSeenInStock: new Date() } : {}),
-            ...(showcaseRub != null && showcaseRub > 0
+            ...(parseRecovered && showcaseRub != null && showcaseRub > 0
               ? {
                   lastWalletObservedRub: showcaseRub,
                   lastKnownShowcaseRub: Math.round(showcaseRub),
                   lastKnownWalletRub: Math.round(showcaseRub),
                   lastPriceSeenAt: new Date(),
                   lastPriceSource: buyerRegularSource,
+                  walletRubLastGood: Math.round(showcaseRub),
+                  walletRubLastGoodAt: new Date(),
+                  sourceLastGood: tier ?? "public_dom",
+                  parseStatusLastGood: parseStatus ?? null,
+                  safeModeHold: false,
+                }
+              : {}),
+            ...(usedLastGoodFallback && showcaseRub != null && showcaseRub > 0
+              ? {
+                  lastWalletObservedRub: showcaseRub,
+                  lastKnownShowcaseRub: Math.round(showcaseRub),
+                  lastKnownWalletRub: Math.round(showcaseRub),
+                  lastPriceSeenAt: new Date(),
+                  lastPriceSource: "last_good",
+                  safeModeHold: true,
                 }
               : {}),
             ...(priceWithoutWalletRub != null && priceWithoutWalletRub > 0
@@ -514,7 +584,7 @@ export async function runPriceMonitorJob(opts: {
         })),
         {
           interStepDelayMs: env.REPRICER_MONITOR_BATCH_INTER_STEP_MS,
-          fetchShowcaseWithCookies: sppViaCookies,
+          fetchShowcaseWithCookies: isBuyerAuthDisabled() ? false : sppViaCookies,
           cardDetailFallbackDest: env.REPRICER_WALLET_DEST.trim() || null,
           maxCardApiAttempts: env.REPRICER_MONITOR_CARD_API_MAX_ATTEMPTS,
         },
@@ -531,8 +601,8 @@ export async function runPriceMonitorJob(opts: {
           profileDir,
           regionDest: row.walletDest,
           timeoutMs: env.REPRICER_MONITOR_WALLET_TIMEOUT_MS,
-          /** Иначе при выключенном SPP_VIA_COOKIES витрина без card.wb.ru по dest — пустой WB в снимке региона. */
-          fetchShowcaseWithCookies: sppViaCookies || Boolean(row.walletDest?.trim()),
+          fetchShowcaseWithCookies:
+            isBuyerAuthDisabled() ? false : sppViaCookies || Boolean(row.walletDest?.trim()),
         });
         await persistMonitorStep(row.p, row.walletDest, dom, true);
       }
@@ -573,7 +643,7 @@ export async function runPriceMonitorJob(opts: {
       });
     }
 
-    if (domSuccessForSession && session?.id) {
+    if (!isBuyerAuthDisabled() && domSuccessForSession && session?.id) {
       await prisma.buyerSession.update({
         where: { id: session.id },
         data: { lastDomSuccessAt: new Date() },
@@ -603,5 +673,9 @@ export async function runPriceMonitorJob(opts: {
       data: { status: "failed", finishedAt: new Date(), errorMessage: msg.slice(0, 2000) },
     });
     throw e;
+  } finally {
+    if (ephemeralProfileDir) {
+      removeEphemeralWalletProfileDir(ephemeralProfileDir);
+    }
   }
 }

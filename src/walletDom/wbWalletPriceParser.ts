@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { chromium, type BrowserContext, type Page, type Response } from "playwright";
 import { env } from "../config/env.js";
+import { isPublicOnlyWalletParse } from "../lib/repricerMode.js";
 import { runExclusiveBuyerChromeProfile } from "../lib/buyerChromeProfileLock.js";
 import { logger } from "../lib/logger.js";
 import { resolveStockLevel } from "../lib/stockLevel.js";
@@ -409,12 +410,8 @@ export type WalletParseStatus =
   | "auth_required"
   | "blocked_or_captcha";
 
-/** Какой слой стратегии дал итоговые цены (public-first → popup → cookies). */
-export type WalletPriceParseSource =
-  | "public_dom"
-  | "detail_popup_dom"
-  | "cookies_fallback"
-  | "unknown";
+/** Источник цены на публичной витрине (PUBLIC ONLY — без buyer/cookies). */
+export type WalletPriceParseSource = "public_dom" | "popup_dom" | "unknown";
 
 export type WalletParserResult = {
   nmId: number;
@@ -2324,7 +2321,7 @@ export function inferWalletPriceParseSource(input: {
     (p.parseStatus === "parse_failed" || p.parseStatus === "only_regular_found");
 
   if (popupFixedWallet) {
-    return "detail_popup_dom";
+    return "popup_dom";
   }
 
   const cookiesRecoveredAfterDomFail =
@@ -2333,7 +2330,7 @@ export function inferWalletPriceParseSource(input: {
     !(popupOpened && popupWalletRub != null && popupWalletRub > 0);
 
   if (cookiesRecoveredAfterDomFail) {
-    return "cookies_fallback";
+    return "unknown";
   }
 
   if (domWalletOk || domRegularOk) {
@@ -2345,7 +2342,7 @@ export function inferWalletPriceParseSource(input: {
     f.showcaseRubEffective != null &&
     f.showcaseRubEffective > 0
   ) {
-    return "cookies_fallback";
+    return "unknown";
   }
 
   return "unknown";
@@ -2417,7 +2414,7 @@ async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<Walle
     }
     attachWalletNetworkCollectors(page, networkUrls);
     const dom = await scrapeWalletPriceOnPage(page, input, resolved, networkUrls);
-    if (input.fetchShowcaseWithCookies === true && input.nmId != null) {
+    if (input.fetchShowcaseWithCookies === true && input.nmId != null && !isPublicOnlyWalletParse()) {
       const stockLevel = resolveStockLevel(null, dom.inStock);
       const orc = await resolveShowcaseForMonitorStep({
         walletDom: dom,
@@ -2562,8 +2559,9 @@ async function getWbWalletPriceBatchUnlocked(
       const step = steps[i]!;
       const regionRaw = step.region?.trim() ?? "";
       const destKey = regionRaw;
-      /** Без card.wb.ru по dest витрина в DOM часто одна на все склады — WB и СПП по регионам расходятся. */
-      const runShowcaseOrchestrator = useShowcaseCookies || regionRaw.length > 0;
+      /** Без card.wb.ru по dest витрина в DOM часто одна на все склады — в PUBLIC ONLY card отключён. */
+      const runShowcaseOrchestrator =
+        !isPublicOnlyWalletParse() && (useShowcaseCookies || regionRaw.length > 0);
       const needsHardNavigationReset =
         i > 0 && (step.nmId !== prevNmId || destKey !== prevDestKey);
       if (needsHardNavigationReset) {

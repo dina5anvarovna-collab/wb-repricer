@@ -22,7 +22,7 @@ import { useSessionStore } from "../store/session";
 const nav = [
   { to: "/", label: "Дашборд", icon: LayoutDashboard },
   { to: "/connect", label: "Подключение WB", icon: Plug },
-  { to: "/session", label: "Сессия WB", icon: KeyRound },
+  { to: "/session", label: "Парсинг WB", icon: KeyRound },
   { to: "/sync", label: "Синхронизация", icon: RefreshCw },
   { to: "/catalog", label: "Каталог", icon: Package },
   { to: "/products-api", label: "Товары (API)", icon: LayoutList },

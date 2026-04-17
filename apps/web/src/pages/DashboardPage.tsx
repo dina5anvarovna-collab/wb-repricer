@@ -27,6 +27,22 @@ type Dashboard = {
     status: string;
   };
   protection: { globalPause: boolean; emergencyStop: boolean };
+  publicWalletParse?: {
+    buyerAuthDisabled: boolean;
+    publicOnly: boolean;
+    walletParseMode: string;
+    walletDetailsMode: string;
+    monitorSppViaCookies: boolean;
+    safeModeHoldProducts: number;
+    lastKnownGoodSample: {
+      nmId: number;
+      walletRubLastGood: number | null;
+      walletRubLastGoodAt: string | null;
+      sourceLastGood: string | null;
+      parseStatusLastGood: string | null;
+      safeModeHold: boolean;
+    } | null;
+  };
 };
 
 function Card({
@@ -103,19 +119,52 @@ export function DashboardPage() {
             <li>Последние 4 символа: {d.seller.tokenLast4 ?? "—"}</li>
           </ul>
         </div>
-        <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
-          <h2 className="text-sm font-medium text-white">Сессия покупателя (Кошелёк)</h2>
-          <ul className="mt-3 space-y-2 text-sm text-[#c4c9d4]">
-            <li>Активна: {d.buyer.active ? "да" : "нет"}</li>
-            <li>Статус: {d.buyer.status}</li>
-            <li>
-              Последняя успешная DOM-проверка:{" "}
-              {d.buyer.lastDomSuccessAt
-                ? new Date(d.buyer.lastDomSuccessAt).toLocaleString("ru-RU")
-                : "—"}
-            </li>
-          </ul>
-        </div>
+        {d.publicWalletParse?.buyerAuthDisabled ? (
+          <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
+            <h2 className="text-sm font-medium text-white">Публичный парсинг WB</h2>
+            <ul className="mt-3 space-y-2 text-sm text-[#c4c9d4]">
+              <li>
+                Режим: <code className="rounded bg-[#252a33] px-1">{d.publicWalletParse.walletParseMode}</code> ·
+                popup:{" "}
+                <code className="rounded bg-[#252a33] px-1">{d.publicWalletParse.walletDetailsMode}</code>
+              </li>
+              <li>
+                Safe mode (товары):{" "}
+                <span className={d.publicWalletParse.safeModeHoldProducts > 0 ? "text-amber-200" : "text-emerald-300"}>
+                  {d.publicWalletParse.safeModeHoldProducts > 0
+                    ? `YES (${d.publicWalletParse.safeModeHoldProducts})`
+                    : "NO"}
+                </span>
+              </li>
+              <li>
+                Последний известный wallet (last good):{" "}
+                {d.publicWalletParse.lastKnownGoodSample?.walletRubLastGood != null
+                  ? `${Math.round(d.publicWalletParse.lastKnownGoodSample.walletRubLastGood)} ₽`
+                  : "—"}
+                {d.publicWalletParse.lastKnownGoodSample?.walletRubLastGoodAt
+                  ? ` · ${new Date(d.publicWalletParse.lastKnownGoodSample.walletRubLastGoodAt).toLocaleString("ru-RU")}`
+                  : ""}
+              </li>
+              <li className="text-xs text-[#8b93a7]">
+                Buyer-auth отключён — мониторинг без cookies expiry и без relogin.
+              </li>
+            </ul>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
+            <h2 className="text-sm font-medium text-white">Сессия покупателя (legacy)</h2>
+            <ul className="mt-3 space-y-2 text-sm text-[#c4c9d4]">
+              <li>Активна: {d.buyer.active ? "да" : "нет"}</li>
+              <li>Статус: {d.buyer.status}</li>
+              <li>
+                Последняя успешная DOM-проверка:{" "}
+                {d.buyer.lastDomSuccessAt
+                  ? new Date(d.buyer.lastDomSuccessAt).toLocaleString("ru-RU")
+                  : "—"}
+              </li>
+            </ul>
+          </div>
+        )}
       </div>
       {st?.lastMonitorParseStats ? (
         <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-4">
@@ -124,7 +173,7 @@ export function DashboardPage() {
             {JSON.stringify(st.lastMonitorParseStats, null, 2)}
           </pre>
           <p className="mt-2 text-xs text-[#8b93a7]">
-            publicDom / detailPopupDom / cookiesFallback / unknown / authWall / captcha — счётчики по шагам nm×регион.
+            publicDom / popupDom / unknown / authWall / captcha / safeModeLastGood — счётчики по шагам nm×регион.
           </p>
         </div>
       ) : null}
