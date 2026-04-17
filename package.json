@@ -31,8 +31,10 @@
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",
+    "@fastify/multipart": "^10.0.0",
     "@fastify/static": "^8.0.2",
     "@prisma/client": "^6.3.1",
+    "adm-zip": "^0.5.17",
     "dotenv": "^16.4.7",
     "fastify": "^5.2.1",
     "node-cron": "^3.0.3",
@@ -42,6 +44,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.10.5",
     "@types/node-cron": "^3.0.11",
     "prisma": "^6.3.1",
