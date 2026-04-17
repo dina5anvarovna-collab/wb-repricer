@@ -1,3 +1,4 @@
+import type { PriceSnapshot } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { logger } from "../../lib/logger.js";
 import { env } from "../../config/env.js";
@@ -5,32 +6,20 @@ import { regionLabelForDest } from "../../lib/wbRegions.js";
 import { getSelectedRegionDests } from "../../lib/monitorPrefs.js";
 import { writeAuditLog } from "../../lib/auditLog.js";
 import { isEmergencyStop, isGlobalPaused } from "../../lib/appSettings.js";
-import { getActiveCabinetToken, resolveBuyerProfileDir } from "../catalogSync/syncCatalog.js";
+import { getActiveCabinetToken } from "../catalogSync/syncCatalog.js";
 import {
-  createEphemeralWalletProfileDir,
-  removeEphemeralWalletProfileDir,
-} from "../../lib/ephemeralWalletProfile.js";
-import { isBuyerAuthDisabled } from "../../lib/repricerMode.js";
-import { getBuyerDisplayedPrice } from "../wbBuyerDom/runWalletCli.js";
-import { resolveObservedBuyerPrices } from "../pricing/resolveObservedBuyerPrices.js";
-import {
-  aggregateTrustedProductSnapshot,
-  buildBuyerRegionalSnapshotFromPriceSnapshot,
-  buildBuyerRegionalSnapshotFromResolved,
-  buildSellerSnapshotFromProduct,
-  evaluateTrustedRepricingDecision,
-} from "../pricing/trustedProductSnapshot.js";
+  THRESHOLD_DECREASE,
+  THRESHOLD_PROTECTIVE,
+  allowsAutomaticPriceDecrease,
+  allowsProtectiveAction,
+} from "../../lib/repricingGuards.js";
 import {
   fetchGoodsPriceByNmId,
   uploadGoodsPricesTask,
   WbSellerApiError,
 } from "../wbSellerApi/client.js";
-import {
-  computeProtectionRaise,
-  type RoundingMode,
-} from "../priceProtection/engine.js";
+import { computeProtectionRaise, type RoundingMode } from "../priceProtection/engine.js";
 import { ReasonCode } from "../priceProtection/reasonCodes.js";
-import { resolveStockLevel } from "../../lib/stockLevel.js";
 
 const BATCH_PAUSE_MS = 650;
 
@@ -42,6 +31,8 @@ const ROUNDING: RoundingMode[] = [
   "end90",
   "end99",
 ];
+
+const SNAPSHOT_MAX_AGE_H = 24;
 
 function parseSnapshotDetailJson(raw: string | null | undefined): Record<string, unknown> {
   if (!raw) return {};
@@ -56,9 +47,28 @@ function parseRounding(mode: string | null | undefined): RoundingMode {
   return ROUNDING.includes(mode as RoundingMode) ? (mode as RoundingMode) : "integer";
 }
 
+/** 0..1 из снимка мониторинга */
+export function snapshotNumericConfidence(s: PriceSnapshot): number {
+  if (s.parseConfidence != null && Number.isFinite(s.parseConfidence)) {
+    return Math.max(0, Math.min(1, s.parseConfidence));
+  }
+  const dj = parseSnapshotDetailJson(s.detailJson);
+  const c = dj.confidence as string | undefined;
+  if (c === "HIGH") return 1;
+  if (c === "MEDIUM") return 0.7;
+  if (c === "LOW") return 0.3;
+  return 0;
+}
+
+function expectedFinalRub(base: number, discountPct: number): number {
+  const d = discountPct;
+  if (!Number.isFinite(base) || base <= 0) return 0;
+  if (!Number.isFinite(d) || d <= 0 || d >= 100) return base;
+  return Math.round(base * ((100 - d) / 100));
+}
+
 /**
- * Защита минимальной итоговой цены: observed mode (кошелёк/DOM + цены кабинета),
- * подъём базовой цены в WB при нарушении min.
+ * Enforcement использует только снимки мониторинга из БД (без live DOM).
  */
 export async function runEnforcementJob(opts: {
   workerId: string;
@@ -104,30 +114,15 @@ export async function runEnforcementJob(opts: {
         maxPriceStepPercent: opts.maxPriceStepPercent,
         regionDest: opts.regionDest,
         regionLabel: opts.regionLabel,
+        source: "db_snapshots_only",
       }),
     },
   });
 
   let corrections = 0;
   let skipped = 0;
-  let ephemeralProfileDir: string | null = null;
 
   try {
-    const session = isBuyerAuthDisabled()
-      ? null
-      : await prisma.buyerSession.findFirst({
-          where: { status: "active", isAuthorized: true },
-          orderBy: { updatedAt: "desc" },
-        });
-    let profileDir = session?.profileDir ?? resolveBuyerProfileDir();
-    if (isBuyerAuthDisabled()) {
-      ephemeralProfileDir = createEphemeralWalletProfileDir();
-      profileDir = ephemeralProfileDir;
-      logger.info(
-        { tag: "enforce-public-only", profileDir },
-        "public parse — ephemeral browser profile (no buyer auth)",
-      );
-    }
     const selectedRegionDests = await getSelectedRegionDests();
 
     const products = await prisma.wbProduct.findMany({
@@ -163,18 +158,32 @@ export async function runEnforcementJob(opts: {
         continue;
       }
 
-      const dom = await getBuyerDisplayedPrice({
-        nmId: p.nmId,
-        profileDir,
-        regionDest: opts.regionDest,
-        fetchShowcaseWithCookies: !isBuyerAuthDisabled(),
-      });
+      const destFilter =
+        selectedRegionDests.length > 0
+          ? selectedRegionDests
+          : opts.regionDest
+            ? [opts.regionDest]
+            : [];
 
-      if (p.safeModeHold === true && !dom.success) {
-        logger.warn(
-          { nmId: p.nmId, tag: "enforce-safe-hold" },
-          "enforcement skipped — safe mode hold, live public parse unavailable",
-        );
+      const latestPerDest: PriceSnapshot[] = [];
+      if (destFilter.length > 0) {
+        for (const d of destFilter) {
+          const dest = d.trim();
+          const snap = await prisma.priceSnapshot.findFirst({
+            where: { productId: p.id, regionDest: dest },
+            orderBy: [{ parsedAt: "desc" }, { id: "desc" }],
+          });
+          if (snap) latestPerDest.push(snap);
+        }
+      } else {
+        const snap = await prisma.priceSnapshot.findFirst({
+          where: { productId: p.id },
+          orderBy: [{ parsedAt: "desc" }, { id: "desc" }],
+        });
+        if (snap) latestPerDest.push(snap);
+      }
+
+      if (latestPerDest.length === 0) {
         await writeAuditLog({
           action: "protection.skip",
           entityType: "WbProduct",
@@ -182,8 +191,10 @@ export async function runEnforcementJob(opts: {
           dryRun: opts.dryRun,
           meta: {
             nmId: p.nmId,
-            reason: "wallet_source_unavailable_safe_hold",
-            domError: dom.error ?? null,
+            finalAction: "skipped_no_fresh_wallet_data",
+            reason: "no_price_snapshots",
+            minimumAllowed: minAllowed,
+            safeModeHold: p.safeModeHold,
           },
         });
         skipped += 1;
@@ -192,90 +203,11 @@ export async function runEnforcementJob(opts: {
         continue;
       }
 
-      const stockLevel = resolveStockLevel(p.stock, dom.inStock ?? null);
-      const lastRegionSnapshot = await prisma.priceSnapshot.findFirst({
-        where: { productId: p.id, regionDest: opts.regionDest },
-        orderBy: { parsedAt: "desc" },
-        select: { buyerWalletPrice: true, buyerRegularPrice: true },
-      });
-      const resolved = resolveObservedBuyerPrices({
-        dom,
-        stockLevel,
-        expectedNmId: p.nmId,
-        expectedDest: opts.regionDest,
-        fallbackContext: {
-          discountedPriceRub: p.discountedPriceRub,
-          targetRub: minAllowed,
-          sellerPrice: p.sellerPrice,
-          lastSnapshotWalletRub: lastRegionSnapshot?.buyerWalletPrice ?? null,
-          lastSnapshotRegularRub: lastRegionSnapshot?.buyerRegularPrice ?? null,
-          lastKnownShowcaseRub: p.lastKnownShowcaseRub,
-          lastKnownWalletRub: p.lastKnownWalletRub,
-          lastRegularObservedRub: p.lastRegularObservedRub,
-          lastWalletObservedRub: p.lastWalletObservedRub,
-        },
-      });
-
-      const sellerSnapshot = buildSellerSnapshotFromProduct(p);
-      const destFilter =
-        selectedRegionDests.length > 0
-          ? selectedRegionDests
-          : opts.regionDest
-            ? [opts.regionDest]
-            : [];
-      const recentRegionalSnapshots =
-        destFilter.length > 0
-          ? await prisma.priceSnapshot.findMany({
-              where: { productId: p.id, regionDest: { in: destFilter } },
-              orderBy: [{ parsedAt: "desc" }, { id: "desc" }],
-            })
-          : [];
-      const regionalByDest = new Map<string, (typeof recentRegionalSnapshots)[number]>();
-      for (const s of recentRegionalSnapshots) {
-        const k = (s.regionDest ?? "").trim();
-        if (!k) continue;
-        if (!regionalByDest.has(k)) regionalByDest.set(k, s);
-      }
-      const trustedRegional = [...regionalByDest.values()].map((s) =>
-        buildBuyerRegionalSnapshotFromPriceSnapshot(s),
+      const newest = new Date(
+        Math.max(...latestPerDest.map((s) => s.parsedAt.getTime())),
       );
-      const currentRegional = buildBuyerRegionalSnapshotFromResolved({
-        nmId: p.nmId,
-        dest: opts.regionDest ?? null,
-        resolved,
-        parseError: dom.error ?? null,
-        inStock: dom.inStock ?? null,
-        timestampIso: new Date().toISOString(),
-      });
-      if (currentRegional.dest) {
-        const idx = trustedRegional.findIndex((r) => (r.dest ?? "") === currentRegional.dest);
-        if (idx >= 0) trustedRegional[idx] = currentRegional;
-        else trustedRegional.push(currentRegional);
-      } else {
-        trustedRegional.push(currentRegional);
-      }
-      const trustedBase = aggregateTrustedProductSnapshot({
-        nmId: p.nmId,
-        seller: sellerSnapshot,
-        regional: trustedRegional,
-        totalRegionsCount: Math.max(destFilter.length, trustedRegional.length, 1),
-        minVerifiedRegions: Math.max(1, env.REPRICER_MIN_VALID_REGIONS_FOR_ENFORCE),
-      });
-      const trusted = evaluateTrustedRepricingDecision({
-        trusted: trustedBase,
-        minPriceRub: minAllowed,
-      });
-      const observedWallet = trusted.aggregatedShowcaseWithWalletRub;
-      const observedRegular = trusted.aggregatedPriceWithSppRub;
-      const walletConf =
-        trusted.confidenceLevel === "HIGH"
-          ? 1
-          : trusted.confidenceLevel === "MEDIUM"
-            ? 0.7
-            : 0.3;
-      const hardSafetyBlockers = [...resolved.blockedBySafetyRule, ...trusted.blockedBySafetyRule];
-
-      if (!trusted.repricingAllowed) {
+      const snapshotAgeH = (Date.now() - newest.getTime()) / 3_600_000;
+      if (snapshotAgeH > SNAPSHOT_MAX_AGE_H) {
         await writeAuditLog({
           action: "protection.skip",
           entityType: "WbProduct",
@@ -283,18 +215,65 @@ export async function runEnforcementJob(opts: {
           dryRun: opts.dryRun,
           meta: {
             nmId: p.nmId,
-            reason: "guard_trusted_snapshot_not_ready",
-            verificationStatus: resolved.buyerPriceVerification.verificationStatus,
-            verificationReason: resolved.buyerPriceVerification.verificationReason,
-            priceParseMode: resolved.priceParseMode,
-            usedFallback: resolved.fallback.usedFallback,
-            repricingAllowedReason: resolved.repricingAllowedReason,
-            blockedBySafetyRule: resolved.blockedBySafetyRule,
-            confidence: resolved.confidence,
-            trustedFrontStatus: trusted.frontStatus,
-            trustedValidRegions: trusted.validRegionsCount,
-            trustedTotalRegions: trusted.totalRegionsCount,
-            trustedReason: trusted.repricingAllowedReason,
+            finalAction: "skipped_no_fresh_wallet_data",
+            reason: `snapshot_age_${snapshotAgeH.toFixed(1)}h_gt_${SNAPSHOT_MAX_AGE_H}h`,
+            minimumAllowed: minAllowed,
+            safeModeHold: p.safeModeHold,
+          },
+        });
+        skipped += 1;
+        processed += 1;
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+        continue;
+      }
+
+      const wallets = latestPerDest
+        .map((s) => s.buyerWalletPrice)
+        .filter((x): x is number => x != null && Number.isFinite(x) && x > 0);
+      if (wallets.length === 0) {
+        await writeAuditLog({
+          action: "protection.skip",
+          entityType: "WbProduct",
+          entityId: p.id,
+          dryRun: opts.dryRun,
+          meta: {
+            nmId: p.nmId,
+            finalAction: "skipped_no_fresh_wallet_data",
+            reason: "no_wallet_rub_in_snapshots",
+            minimumAllowed: minAllowed,
+            safeModeHold: p.safeModeHold,
+          },
+        });
+        skipped += 1;
+        processed += 1;
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+        continue;
+      }
+
+      const observedWallet = Math.min(...wallets);
+      const confidences = latestPerDest.map(snapshotNumericConfidence);
+      const numericConf = Math.min(...confidences);
+
+      const enforceDest = opts.regionDest?.trim() ?? "";
+      const primarySnap =
+        enforceDest.length > 0
+          ? latestPerDest.find((s) => (s.regionDest ?? "").trim() === enforceDest) ?? latestPerDest[0]
+          : latestPerDest[0];
+      const observedRegular = primarySnap?.buyerRegularPrice ?? null;
+
+      if (!allowsProtectiveAction(numericConf)) {
+        await writeAuditLog({
+          action: "protection.skip",
+          entityType: "WbProduct",
+          entityId: p.id,
+          dryRun: opts.dryRun,
+          meta: {
+            nmId: p.nmId,
+            finalAction: "skipped_low_confidence",
+            confidence: numericConf,
+            thresholdProtective: THRESHOLD_PROTECTIVE,
+            minimumAllowed: minAllowed,
+            oldPriceCabinetRub: null,
           },
         });
         skipped += 1;
@@ -330,7 +309,11 @@ export async function runEnforcementJob(opts: {
             entityType: "WbProduct",
             entityId: p.id,
             dryRun: opts.dryRun,
-            meta: { nmId: p.nmId, reason: "nm_not_found" },
+            meta: {
+              nmId: p.nmId,
+              finalAction: "skipped_seller_api_mismatch",
+              reason: "nm_not_found",
+            },
           });
           skipped += 1;
           processed += 1;
@@ -375,9 +358,11 @@ export async function runEnforcementJob(opts: {
         cooldownMinutes: mr.cooldownMinutes,
         priceToleranceRub: opts.toleranceRub,
         enforcementMode: true,
-        walletParseConfidence: walletConf,
-        minWalletConfidence: env.REPRICER_MIN_WALLET_PARSE_CONFIDENCE,
+        walletParseConfidence: numericConf,
+        minWalletConfidence: Math.min(THRESHOLD_PROTECTIVE, env.REPRICER_MIN_WALLET_PARSE_CONFIDENCE),
       });
+
+      const hardSafetyBlockers: string[] = [];
 
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
@@ -394,27 +379,15 @@ export async function runEnforcementJob(opts: {
       }
 
       if (destFilter.length > 0) {
-        const snaps = await prisma.priceSnapshot.findMany({
-          where: { productId: p.id, regionDest: { in: destFilter } },
-          orderBy: [{ parsedAt: "desc" }, { id: "desc" }],
-        });
-        const perDest = new Map<string, typeof snaps[number]>();
-        for (const s of snaps) {
-          const key = (s.regionDest ?? "").trim();
-          if (!key) continue;
-          if (!perDest.has(key)) perDest.set(key, s);
-        }
-        const totalRegionsCount = destFilter.length;
         let validRegionsCount = 0;
         for (const d of destFilter) {
-          const snap = perDest.get(d.trim());
+          const snap = latestPerDest.find((x) => (x.regionDest ?? "").trim() === d.trim());
           if (!snap) continue;
-          const dj = parseSnapshotDetailJson(snap.detailJson);
-          if (dj.repricingAllowed === true && dj.confidence === "HIGH") {
+          if (snapshotNumericConfidence(snap) >= THRESHOLD_PROTECTIVE && snap.buyerWalletPrice != null && snap.buyerWalletPrice > 0) {
             validRegionsCount += 1;
           }
         }
-        if (validRegionsCount < Math.min(env.REPRICER_MIN_VALID_REGIONS_FOR_ENFORCE, totalRegionsCount)) {
+        if (validRegionsCount < Math.min(env.REPRICER_MIN_VALID_REGIONS_FOR_ENFORCE, destFilter.length)) {
           hardSafetyBlockers.push("insufficient_valid_regions");
         }
       }
@@ -430,10 +403,10 @@ export async function runEnforcementJob(opts: {
           .map((x) => (x.buyerWalletPrice != null && x.buyerWalletPrice > 0 ? x.buyerWalletPrice : null))
           .filter((x): x is number => x != null);
         if (vals.length >= 2) {
-          const max = Math.max(...vals);
-          const min = Math.min(...vals);
+          const mx = Math.max(...vals);
+          const mn = Math.min(...vals);
           const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
-          const spreadPct = avg > 0 ? ((max - min) / avg) * 100 : 0;
+          const spreadPct = avg > 0 ? ((mx - mn) / avg) * 100 : 0;
           if (spreadPct > env.REPRICER_REGION_STABILITY_MAX_SPREAD_PCT) {
             hardSafetyBlockers.push("region_price_unstable");
           }
@@ -449,11 +422,24 @@ export async function runEnforcementJob(opts: {
         },
       });
 
+      const auditBase = {
+        nmId: p.nmId,
+        oldPriceRub: cab.price,
+        proposedPriceRub: eng.newBasePrice ?? null,
+        minimumAllowed: minAllowed,
+        source: "db_price_snapshots",
+        confidence: numericConf,
+        safeModeHold: p.safeModeHold,
+        parseSourceHint: parseSnapshotDetailJson(primarySnap.detailJson).priceParseSource ?? null,
+        thresholdDecrease: THRESHOLD_DECREASE,
+        thresholdProtective: THRESHOLD_PROTECTIVE,
+      };
+
       if (eng.action === "no_change" || eng.action === "skip") {
         const skipNoWallet =
-          eng.reasonCode === "skipped_no_wallet" ||
-          eng.reasonCode === "skipped_low_confidence" ||
-          eng.reasonCode === "skipped_no_observed_final";
+          eng.reasonCode === ReasonCode.SKIPPED_NO_WALLET ||
+          eng.reasonCode === ReasonCode.SKIPPED_LOW_CONFIDENCE ||
+          eng.reasonCode === ReasonCode.SKIPPED_NO_OBSERVED_FINAL;
         if (eng.action === "skip" && skipNoWallet) {
           await prisma.cabinetPriceUpload.create({
             data: {
@@ -475,18 +461,25 @@ export async function runEnforcementJob(opts: {
                 formulaLog: eng.formulaLog,
                 flags: eng.safetyFlags,
               }),
-              parseConfidence: walletConf,
+              parseConfidence: numericConf,
               syncJobId: job.id,
             },
           });
         }
+        const fa =
+          eng.reasonCode === ReasonCode.SKIPPED_LOW_CONFIDENCE
+            ? "skipped_low_confidence"
+            : eng.reasonCode === ReasonCode.SKIPPED_NO_WALLET
+              ? "skipped_no_fresh_wallet_data"
+              : `skipped_${eng.reasonCode}`;
         await writeAuditLog({
           action: `protection.${eng.action}`,
           entityType: "WbProduct",
           entityId: p.id,
           dryRun: opts.dryRun,
           meta: {
-            nmId: p.nmId,
+            ...auditBase,
+            finalAction: fa,
             reason: eng.reason,
             observedFinal: eng.observedFinalPrice,
             flags: eng.safetyFlags,
@@ -499,12 +492,54 @@ export async function runEnforcementJob(opts: {
       }
 
       const proposed = eng.newBasePrice!;
+
+      const expectedAfterApply = expectedFinalRub(proposed, cab.discount);
+      if (expectedAfterApply < minAllowed - opts.toleranceRub) {
+        await writeAuditLog({
+          action: "protection.skip",
+          entityType: "WbProduct",
+          entityId: p.id,
+          dryRun: opts.dryRun,
+          meta: {
+            ...auditBase,
+            finalAction: "skipped_below_min",
+            reason: "blocked_by_min_price_rule",
+            expectedAfterApply,
+          },
+        });
+        skipped += 1;
+        processed += 1;
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+        continue;
+      }
+
+      if (proposed < cab.price) {
+        await writeAuditLog({
+          action: "protection.skip",
+          entityType: "WbProduct",
+          entityId: p.id,
+          dryRun: opts.dryRun,
+          meta: {
+            ...auditBase,
+            finalAction: "skipped_price_decrease_blocked",
+            reason: "never_lower_base_without_high_confidence",
+            wouldDecrease: true,
+            decreaseAllowed: allowsAutomaticPriceDecrease(numericConf),
+          },
+        });
+        skipped += 1;
+        processed += 1;
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+        continue;
+      }
+
       if (proposed === cab.price) {
         skipped += 1;
         processed += 1;
         await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
         continue;
       }
+
       const lastSubmitted = await prisma.cabinetPriceUpload.findFirst({
         where: { productId: p.id, dryRun: false, status: "submitted" },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -523,11 +558,10 @@ export async function runEnforcementJob(opts: {
           entityId: p.id,
           dryRun: opts.dryRun,
           meta: {
-            nmId: p.nmId,
-            reason: "guard_safety_blockers",
+            ...auditBase,
+            proposedPriceRub: proposed,
+            finalAction: "skipped_safety_blockers",
             blockedBySafetyRule: hardSafetyBlockers,
-            confidence: resolved.confidence,
-            verificationReason: resolved.buyerPriceVerification.verificationReason,
           },
         });
         skipped += 1;
@@ -535,6 +569,16 @@ export async function runEnforcementJob(opts: {
         await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
         continue;
       }
+
+      const djPrimary = parseSnapshotDetailJson(primarySnap.detailJson);
+      const appliedReason =
+        numericConf >= THRESHOLD_DECREASE
+          ? djPrimary.priceParseSource === "popup_dom"
+            ? "applied_popup_dom_confident"
+            : "applied_public_dom_confident"
+          : p.walletRubLastGood != null && p.safeModeHold
+            ? "applied_protective_raise_last_good"
+            : "applied_protective_raise_snapshot";
 
       if (opts.dryRun) {
         await prisma.cabinetPriceUpload.create({
@@ -554,7 +598,7 @@ export async function runEnforcementJob(opts: {
             errorMessage: eng.reason,
             reasonCode: eng.reasonCode,
             engineDetailJson: JSON.stringify({ formulaLog: eng.formulaLog, flags: eng.safetyFlags }),
-            parseConfidence: walletConf,
+            parseConfidence: numericConf,
             syncJobId: job.id,
           },
         });
@@ -565,10 +609,11 @@ export async function runEnforcementJob(opts: {
           dryRun: true,
           requestJson: { nmID: cab.nmID, price: proposed, discount: cab.discount },
           meta: {
-            nmId: p.nmId,
+            ...auditBase,
+            proposedPriceRub: proposed,
+            finalAction: appliedReason,
             expectedFinal: eng.expectedFinalPrice,
             observedFinal: eng.observedFinalPrice,
-            reason: eng.reason,
           },
         });
         corrections += 1;
@@ -599,7 +644,7 @@ export async function runEnforcementJob(opts: {
             errorMessage: eng.reason,
             reasonCode: ReasonCode.BELOW_MIN_RAISE_SUBMITTED,
             engineDetailJson: JSON.stringify({ formulaLog: eng.formulaLog, flags: eng.safetyFlags }),
-            parseConfidence: walletConf,
+            parseConfidence: numericConf,
             syncJobId: job.id,
           },
         });
@@ -620,10 +665,11 @@ export async function runEnforcementJob(opts: {
           requestJson: { nmID: cab.nmID, price: proposed, discount: cab.discount },
           responseJson: uploadRes,
           meta: {
-            nmId: p.nmId,
+            ...auditBase,
+            proposedPriceRub: proposed,
+            finalAction: appliedReason,
             expectedFinal: eng.expectedFinalPrice,
             observedFinal: eng.observedFinalPrice,
-            reason: eng.reason,
           },
         });
         corrections += 1;
@@ -657,7 +703,7 @@ export async function runEnforcementJob(opts: {
             errorMessage: msg.slice(0, 2000),
             reasonCode: ReasonCode.BELOW_MIN_RAISE_PROPOSED,
             engineDetailJson: JSON.stringify({ formulaLog: eng.formulaLog, uploadError: msg.slice(0, 500) }),
-            parseConfidence: walletConf,
+            parseConfidence: numericConf,
             syncJobId: job.id,
           },
         });
@@ -666,7 +712,7 @@ export async function runEnforcementJob(opts: {
           entityType: "WbProduct",
           entityId: p.id,
           dryRun: false,
-          meta: { nmId: p.nmId, error: msg.slice(0, 500), proposed },
+          meta: { error: msg.slice(0, 500), proposed, ...auditBase },
         });
         logger.warn({ nmId: p.nmId, err: msg }, "cabinet price upload failed");
       }
@@ -689,10 +735,6 @@ export async function runEnforcementJob(opts: {
       data: { status: "failed", finishedAt: new Date(), errorMessage: msg.slice(0, 2000) },
     });
     throw e;
-  } finally {
-    if (ephemeralProfileDir) {
-      removeEphemeralWalletProfileDir(ephemeralProfileDir);
-    }
   }
 }
 

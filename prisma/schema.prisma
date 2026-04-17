@@ -80,8 +80,12 @@ model WbProduct {
   /** Последняя успешная цена WB Кошелька (public DOM / popup), для safe mode при сбое парсинга */
   walletRubLastGood          Float?
   walletRubLastGoodAt        DateTime?
+  /** Цена без кошелька (последний успешный non-wallet), для safe mode */
+  nonWalletRubLastGood       Float?
   sourceLastGood             String?
   parseStatusLastGood        String?
+  /** 0..1 агрегированная уверенность последнего успешного парсинга кошелька */
+  walletConfidenceLastGood   Float?
   /** Парсинг не дал цену — удерживаем цену, не понижаем агрессивно */
   safeModeHold               Boolean  @default(false)
   updatedAt            DateTime @updatedAt
@@ -310,8 +314,9 @@ model SyncJob {
   cabinetUploads  CabinetPriceUpload[]
 }
 
+/// Один активный lock на тип джобы: monitor | enforce | catalog
 model SchedulerLock {
-  id        String   @id @default("singleton")
+  id        String   @id
   lockedBy  String?
   lockedAt  DateTime?
   expiresAt DateTime?

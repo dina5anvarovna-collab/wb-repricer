@@ -25,6 +25,10 @@ import {
   buildSellerSnapshotFromProduct,
   type BuyerRegionalSnapshot,
 } from "../pricing/trustedProductSnapshot.js";
+import {
+  lastGoodSubstitutionMode,
+  walletParseNumericConfidence,
+} from "../../lib/repricingGuards.js";
 
 const EVAL_TOL_RUB = 3;
 
@@ -261,21 +265,41 @@ export async function runPriceMonitorJob(opts: {
         parseStatus !== "auth_required" &&
         parseStatus !== "blocked_or_captcha";
 
+      const popupParsed =
+        tier === "popup_dom" || ((dom as any).popupOpened === true && tier !== "popup_dom");
+      const walletMarkerDetected =
+        parseStatus === "wallet_found" ||
+        (tier === "public_dom" &&
+          parseStatus !== "parse_failed" &&
+          parseStatus !== "only_regular_found");
+
+      const lastGoodMode = lastGoodSubstitutionMode(p.walletRubLastGoodAt ?? null);
+
       let usedLastGoodFallback = false;
+      let protectOnlyLastGood = false;
       if (
         isPublicOnlyWalletParse() &&
         !parseRecovered &&
         p.walletRubLastGood != null &&
         Number.isFinite(p.walletRubLastGood) &&
-        p.walletRubLastGood > 0
+        p.walletRubLastGood > 0 &&
+        lastGoodMode !== "none"
       ) {
         usedLastGoodFallback = true;
+        protectOnlyLastGood = lastGoodMode === "protect_only";
         showcaseRub = Math.round(p.walletRubLastGood);
         buyerWallet = Math.round(p.walletRubLastGood);
         parseStats.safeModeLastGood += 1;
         logger.warn(
-          { nmId: p.nmId, tag: "public-parse", rub: showcaseRub },
-          "safe mode enabled — last known good wallet value used",
+          {
+            nmId: p.nmId,
+            tag: "public-parse",
+            rub: showcaseRub,
+            lastGoodMode,
+          },
+          protectOnlyLastGood
+            ? "safe mode — last good used (protect-only TTL 2–24h)"
+            : "safe mode enabled — last known good wallet value used",
         );
       }
 
@@ -287,6 +311,23 @@ export async function runPriceMonitorJob(opts: {
       const fb = resolved.fallback;
       const { showcaseEff, cookieShowcase, apiWalletRub, domRegular, sppWoWallet } = resolved.signals;
       const priceWithoutWalletRub = resolved.priceWithoutWalletRub;
+
+      const partialDom =
+        parseStatus === "only_regular_found" ||
+        (!parseRecovered && dom.success && !usedLastGoodFallback);
+
+      let walletNumericConfidence = walletParseNumericConfidence({
+        priceParseSource: tier,
+        parseStatus,
+        walletMarkerDetected,
+        popupParsed,
+        partialDom,
+      });
+      if (protectOnlyLastGood && usedLastGoodFallback) {
+        walletNumericConfidence = Math.min(walletNumericConfidence, 0.45);
+      } else if (usedLastGoodFallback) {
+        walletNumericConfidence = Math.min(walletNumericConfidence, 0.55);
+      }
 
       const hardAuth =
         parseStatus === "auth_required" || parseStatus === "blocked_or_captcha";
@@ -381,8 +422,13 @@ export async function runPriceMonitorJob(opts: {
         evaluationBase === "ok"
           ? "buyer_unverified"
           : evaluationBase;
+
+      if (parseRecovered && parseStatus === "only_regular_found") {
+        evaluationStatus = "partial";
+      }
       if (usedLastGoodFallback) {
-        evaluationStatus = "wallet_source_unavailable_safe_hold";
+        evaluationStatus =
+          lastGoodMode === "full" ? "last_good_used" : "wallet_source_unavailable_safe_hold";
       }
 
       const sellerBasePriceRub =
@@ -474,6 +520,9 @@ export async function runPriceMonitorJob(opts: {
         usedLastGoodFallback,
         safeMode: usedLastGoodFallback,
         publicOnly: isPublicOnlyWalletParse(),
+        walletNumericConfidence,
+        lastGoodSubstitutionMode: lastGoodMode,
+        protectOnlyLastGood,
       });
 
       await prisma.priceSnapshot.create({
@@ -493,7 +542,7 @@ export async function runPriceMonitorJob(opts: {
           syncJobId: job.id,
           status,
           errorMessage: errMsg,
-          parseConfidence: parseConfidence,
+          parseConfidence: walletNumericConfidence,
           parseMethod: parseMethod,
           walletParseStatus: parseStatus,
           evaluationStatus,
@@ -521,7 +570,7 @@ export async function runPriceMonitorJob(opts: {
           data: {
             lastMonitorAt: new Date(),
             lastMonitorRegionDest: destKey,
-            lastParseConfidence: parseConfidence,
+            lastParseConfidence: walletNumericConfidence,
             lastWalletParseStatus: parseStatus,
             lastEvaluationStatus: evaluationStatus,
             ...(stockLevel === "IN_STOCK" ? { lastSeenInStock: new Date() } : {}),
@@ -536,7 +585,11 @@ export async function runPriceMonitorJob(opts: {
                   walletRubLastGoodAt: new Date(),
                   sourceLastGood: tier ?? "public_dom",
                   parseStatusLastGood: parseStatus ?? null,
+                  walletConfidenceLastGood: walletNumericConfidence,
                   safeModeHold: false,
+                  ...(priceWithoutWalletRub != null && priceWithoutWalletRub > 0
+                    ? { nonWalletRubLastGood: Math.round(priceWithoutWalletRub) }
+                    : {}),
                 }
               : {}),
             ...(usedLastGoodFallback && showcaseRub != null && showcaseRub > 0

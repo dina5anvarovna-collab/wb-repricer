@@ -6,9 +6,28 @@ const KEY_INTERVAL = "MONITOR_INTERVAL_HOURS";
 const KEY_REGIONS = "SELECTED_REGION_DESTS";
 const KEY_LAST_RUN = "MONITOR_LAST_TICK_AT";
 
+/** Диапазон для UI/API; cron читает значение на каждом тике без перезапуска процесса. */
+export const MONITOR_INTERVAL_MIN_HOURS = 0.5;
+export const MONITOR_INTERVAL_MAX_HOURS = 24;
+
 function clampHours(n: number): number {
-  if (!Number.isFinite(n) || n <= 0) return 1;
-  return Math.min(168, Math.max(0.25, n));
+  if (!Number.isFinite(n) || n <= 0) return MONITOR_INTERVAL_MIN_HOURS;
+  const stepped = Math.round(n * 2) / 2;
+  return Math.min(MONITOR_INTERVAL_MAX_HOURS, Math.max(MONITOR_INTERVAL_MIN_HOURS, stepped));
+}
+
+/**
+ * Разбирает ввод PATCH/UI: допустимо 0.5…24 ч, округление к шагу 0.5.
+ * Возвращает null если вне диапазона или не число.
+ */
+export function parseMonitorIntervalHoursInput(input: unknown): number | null {
+  const n =
+    typeof input === "number"
+      ? input
+      : Number(String(input ?? "").trim().replace(",", "."));
+  if (!Number.isFinite(n)) return null;
+  if (n < MONITOR_INTERVAL_MIN_HOURS || n > MONITOR_INTERVAL_MAX_HOURS) return null;
+  return clampHours(n);
 }
 
 /** Интервал планового мониторинга (часы), из настроек; по умолчанию 1. */

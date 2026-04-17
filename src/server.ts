@@ -17,6 +17,11 @@ import {
   healthDb,
   healthStorageDirs,
 } from "./modules/health/healthChecks.js";
+import {
+  buildProductionHealthSummary,
+  healthEnforcement,
+  healthPublicParse,
+} from "./modules/health/productionHealth.js";
 
 async function main(): Promise<void> {
   if (env.REPRICER_PROCESS_MODE === "worker") {
@@ -63,6 +68,9 @@ async function main(): Promise<void> {
   app.get("/health/browser", async () => healthBrowser());
   app.get("/health/buyer-session", async () => healthBuyerSession());
   app.get("/health/storage", async () => healthStorageDirs());
+  app.get("/health/public-parse", async () => healthPublicParse());
+  app.get("/health/enforcement", async () => healthEnforcement());
+  app.get("/health/summary", async () => buildProductionHealthSummary());
 
   if (webEnabled && fs.existsSync(webDist)) {
     await app.register(fastifyStatic, {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiFetch } from "../lib/api";
 
@@ -40,6 +40,9 @@ type BuyerLoginStart = {
 export function SettingsPage() {
   const qc = useQueryClient();
   const [loginPayload, setLoginPayload] = useState<BuyerLoginStart | null>(null);
+  const [intervalDraft, setIntervalDraft] = useState("");
+  const [intervalNotice, setIntervalNotice] = useState<{ kind: "ok" | "err"; text?: string } | null>(null);
+  const intervalOkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const q = useQuery({
     queryKey: ["app-settings"],
@@ -62,6 +65,40 @@ export function SettingsPage() {
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["app-settings"] }),
   });
 
+  type MonitorIntervalPatchRes = { ok: boolean; monitorIntervalHours: number };
+
+  const patchMonitorInterval = useMutation({
+    mutationFn: (monitorIntervalHours: number) =>
+      apiFetch<MonitorIntervalPatchRes>("/api/settings/monitor-interval", {
+        method: "PATCH",
+        json: { monitorIntervalHours },
+      }),
+    onSuccess: (data) => {
+      qc.setQueryData(
+        ["app-settings"],
+        (
+          old:
+            | {
+                GLOBAL_PAUSE: string;
+                EMERGENCY_STOP: string;
+                MONITOR_INTERVAL_HOURS: number;
+              }
+            | undefined,
+        ) => (old ? { ...old, MONITOR_INTERVAL_HOURS: data.monitorIntervalHours } : old),
+      );
+      setIntervalDraft(String(data.monitorIntervalHours));
+      setIntervalNotice({ kind: "ok" });
+      if (intervalOkTimerRef.current) clearTimeout(intervalOkTimerRef.current);
+      intervalOkTimerRef.current = setTimeout(() => {
+        setIntervalNotice((n) => (n?.kind === "ok" ? null : n));
+        intervalOkTimerRef.current = null;
+      }, 3500);
+    },
+    onError: (e) => {
+      setIntervalNotice({ kind: "err", text: (e as Error).message });
+    },
+  });
+
   const buyerLoginStart = useMutation({
     mutationFn: () =>
       apiFetch<BuyerLoginStart>("/api/settings/buyer-session/login/start", { method: "POST" }),
@@ -79,6 +116,19 @@ export function SettingsPage() {
       void qc.invalidateQueries({ queryKey: ["settings-status"] });
     },
   });
+
+  const loadedHours = q.data?.MONITOR_INTERVAL_HOURS;
+  useEffect(() => {
+    if (loadedHours !== undefined) {
+      setIntervalDraft(String(loadedHours));
+    }
+  }, [loadedHours]);
+
+  useEffect(() => {
+    return () => {
+      if (intervalOkTimerRef.current) clearTimeout(intervalOkTimerRef.current);
+    };
+  }, []);
 
   if (q.isLoading) return <p className="text-[#8b93a7]">Загрузка…</p>;
   const s = q.data!;
@@ -220,6 +270,59 @@ export function SettingsPage() {
       </div>
 
       <div className="space-y-4 rounded-xl border border-[#252a33] bg-[#13161c] p-5">
+        <h2 className="text-lg font-medium text-white">Интервал парсинга</h2>
+        <p className="text-sm text-[#8b93a7]">
+          Укажите, как часто запускать мониторинг автоматически.
+        </p>
+        <p className="text-sm text-[#8b93a7]">
+          Текущее значение в настройках:{" "}
+          <strong className="text-white">{s.MONITOR_INTERVAL_HOURS}</strong> ч
+        </p>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-[#8b93a7]">Интервал</span>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0.5}
+                max={24}
+                step={0.5}
+                value={intervalDraft}
+                onChange={(e) => {
+                  setIntervalDraft(e.target.value);
+                  setIntervalNotice(null);
+                }}
+                className="w-28 rounded-lg border border-[#252a33] bg-[#0c0e12] px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+              />
+              <span className="text-sm text-[#c4c9d4]">часов</span>
+            </div>
+          </label>
+          <button
+            type="button"
+            disabled={patchMonitorInterval.isPending}
+            onClick={() => {
+              const raw = intervalDraft.trim().replace(",", ".");
+              const v = Number(raw);
+              if (!Number.isFinite(v)) {
+                setIntervalNotice({ kind: "err", text: "Введите число" });
+                return;
+              }
+              patchMonitorInterval.mutate(v);
+            }}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-40"
+          >
+            {patchMonitorInterval.isPending ? "Сохранение…" : "Сохранить"}
+          </button>
+        </div>
+        {intervalNotice?.kind === "ok" ? (
+          <p className="text-sm text-emerald-400">Сохранено</p>
+        ) : null}
+        {intervalNotice?.kind === "err" ? (
+          <p className="text-sm text-red-400">{intervalNotice.text ?? "Ошибка сохранения"}</p>
+        ) : null}
+      </div>
+
+      <div className="space-y-4 rounded-xl border border-[#252a33] bg-[#13161c] p-5">
         <label className="flex items-center gap-2 text-sm text-[#e8eaef]">
           <input
             type="checkbox"
@@ -236,10 +339,6 @@ export function SettingsPage() {
           />
           Аварийный стоп
         </label>
-        <div className="text-sm text-[#8b93a7]">
-          Интервал мониторинга (часы): <strong className="text-white">{s.MONITOR_INTERVAL_HOURS}</strong> — меняется через API PATCH
-          monitorIntervalHours
-        </div>
       </div>
     </div>
   );

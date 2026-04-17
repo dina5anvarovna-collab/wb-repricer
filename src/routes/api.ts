@@ -23,7 +23,12 @@ import {
 } from "../modules/catalogSync/syncCatalog.js";
 import { coerceQueryStringRecord } from "../lib/httpQuery.js";
 import { loadWbRegions } from "../lib/wbRegions.js";
-import { setMonitorLastTickAt } from "../lib/monitorPrefs.js";
+import {
+  MONITOR_INTERVAL_MAX_HOURS,
+  MONITOR_INTERVAL_MIN_HOURS,
+  parseMonitorIntervalHoursInput,
+  setMonitorLastTickAt,
+} from "../lib/monitorPrefs.js";
 import {
   resolveWalletRegionOpts,
   runEnforcementJob,
@@ -713,11 +718,12 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax >= 1
         ? Math.min(Math.floor(rawMax), 5000)
         : 30;
-    const ok = await acquireSchedulerLock();
+    const ok = await acquireSchedulerLock("monitor");
     if (!ok) {
+      logger.warn({ tag: "monitor_skipped_lock_active" }, "api /api/monitor/run — lock held");
       return reply.code(409).send({
         error:
-          "Мониторинг уже выполняется или глобальный lock занят (дождитесь завершения или истечения TTL — REPRICER_SCHEDULER_LOCK_TTL_MIN). Если процесс упал — lock будет снят при следующем старте systemd-сервиса.",
+          "Мониторинг уже выполняется (lock monitor). Дождитесь завершения или истечения TTL (REPRICER_SCHEDULER_LOCK_TTL_MIN).",
       });
     }
     logger.info({ owner: schedulerLockOwnerLabel() }, "monitor job lock acquired");
@@ -732,7 +738,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       logger.error(e, "monitor run failed");
       return reply.code(500).send({ error: String(e) });
     } finally {
-      await releaseSchedulerLock();
+      await releaseSchedulerLock("monitor");
     }
   });
 
@@ -824,10 +830,11 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       body?.dest?.trim() || env.REPRICER_WALLET_DEST.trim() || primary.regionDest || null;
     const { regionDest, regionLabel } = resolveWalletRegionOpts(destRaw);
 
-    const ok = await acquireSchedulerLock();
+    const ok = await acquireSchedulerLock("enforce");
     if (!ok) {
+      logger.warn({ tag: "enforce_skipped_lock_active" }, "api enforce — lock held");
       return reply.code(409).send({
-        error: "Сейчас уже идёт фоновая задача (мониторинг или защита цен). Подождите её завершения.",
+        error: "Уже выполняется защита цен (lock enforce) или конфликт lock. Подождите завершения.",
       });
     }
     try {
@@ -845,7 +852,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       logger.error(e, "enforce job failed");
       return reply.code(500).send({ error: String(e) });
     } finally {
-      await releaseSchedulerLock();
+      await releaseSchedulerLock("enforce");
     }
   });
 
@@ -902,12 +909,16 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         await setAppSetting(key, v);
       }
     }
+    let monitorIntervalHoursResponse: number | undefined;
     if (b.monitorIntervalHours !== undefined) {
-      const n = Number(b.monitorIntervalHours);
-      if (!Number.isFinite(n) || n <= 0) {
-        return reply.code(400).send({ error: "monitorIntervalHours: положительное число (часы)" });
+      const parsed = parseMonitorIntervalHoursInput(b.monitorIntervalHours);
+      if (parsed === null) {
+        return reply.code(400).send({
+          error: `monitorIntervalHours: число от ${MONITOR_INTERVAL_MIN_HOURS} до ${MONITOR_INTERVAL_MAX_HOURS} часов (шаг 0.5)`,
+        });
       }
-      await setMonitorIntervalHours(n);
+      await setMonitorIntervalHours(parsed);
+      monitorIntervalHoursResponse = await getMonitorIntervalHours();
     }
     if (b.selectedRegionDests !== undefined) {
       if (!Array.isArray(b.selectedRegionDests)) {
@@ -915,8 +926,26 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       }
       await setSelectedRegionDests(b.selectedRegionDests.map((x) => String(x)));
     }
-    return { ok: true };
+    return {
+      ok: true,
+      ...(monitorIntervalHoursResponse !== undefined ? { monitorIntervalHours: monitorIntervalHoursResponse } : {}),
+    };
   });
+
+  app.patch<{ Body: { monitorIntervalHours?: unknown } }>(
+    "/api/settings/monitor-interval",
+    async (req, reply) => {
+      const parsed = parseMonitorIntervalHoursInput(req.body?.monitorIntervalHours);
+      if (parsed === null) {
+        return reply.code(400).send({
+          error: `monitorIntervalHours: число от ${MONITOR_INTERVAL_MIN_HOURS} до ${MONITOR_INTERVAL_MAX_HOURS} часов (шаг 0.5)`,
+        });
+      }
+      await setMonitorIntervalHours(parsed);
+      const monitorIntervalHours = await getMonitorIntervalHours();
+      return { ok: true, monitorIntervalHours };
+    },
+  );
 
   app.get<{ Params: { id: string } }>("/api/products/:id", async (req, reply) => {
     const raw = req.params.id;
@@ -1157,10 +1186,11 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax >= 1
         ? Math.min(Math.floor(rawMax), 5000)
         : 200;
-    const ok = await acquireSchedulerLock();
+    const ok = await acquireSchedulerLock("monitor");
     if (!ok) {
+      logger.warn({ tag: "monitor_skipped_lock_active" }, "api run-monitoring — lock held");
       return reply.code(409).send({
-        error: "Задача уже выполняется (мониторинг или выгрузка). Дождитесь завершения.",
+        error: "Задача уже выполняется (lock monitor). Дождитесь завершения.",
       });
     }
     try {
@@ -1176,7 +1206,45 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       logger.error(e, "run-monitoring failed");
       return reply.code(500).send({ error: String(e) });
     } finally {
-      await releaseSchedulerLock();
+      await releaseSchedulerLock("monitor");
     }
+  });
+
+  /** Агрегированные «корзины» риска по SKU (dead-letter light). */
+  app.get("/api/ops/repricing-risk-buckets", async () => {
+    const [
+      captcha,
+      authWall,
+      needsReview,
+      belowMin,
+      parseFailed,
+      safeHold,
+      lastGoodUsed,
+      walletUnavailableHold,
+    ] = await Promise.all([
+      prisma.wbProduct.count({ where: { lastWalletParseStatus: "blocked_or_captcha" } }),
+      prisma.wbProduct.count({ where: { lastWalletParseStatus: "auth_required" } }),
+      prisma.wbProduct.count({ where: { lastEvaluationStatus: "needs_review" } }),
+      prisma.wbProduct.count({ where: { lastEvaluationStatus: "below_min" } }),
+      prisma.wbProduct.count({ where: { lastEvaluationStatus: "parse_failed" } }),
+      prisma.wbProduct.count({ where: { safeModeHold: true } }),
+      prisma.wbProduct.count({ where: { lastEvaluationStatus: "last_good_used" } }),
+      prisma.wbProduct.count({
+        where: { lastEvaluationStatus: "wallet_source_unavailable_safe_hold" },
+      }),
+    ]);
+    return {
+      buckets: {
+        captcha,
+        auth_wall: authWall,
+        wallet_marker_or_popup_hint: needsReview,
+        below_minimum_observed: belowMin,
+        parse_failed: parseFailed,
+        safe_mode_hold: safeHold,
+        last_good_used: lastGoodUsed,
+        wallet_source_unavailable_safe_hold: walletUnavailableHold,
+      },
+      ts: new Date().toISOString(),
+    };
   });
 }

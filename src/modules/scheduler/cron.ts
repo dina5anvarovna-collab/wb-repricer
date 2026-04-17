@@ -52,9 +52,9 @@ export function startScheduler(): void {
         if (now - last.getTime() < ms) {
           return;
         }
-        const ok = await acquireSchedulerLock();
+        const ok = await acquireSchedulerLock("monitor");
         if (!ok) {
-          /* lock занят — уже идёт мониторинг (ручной или этот же процесс); тихо пропускаем тик */
+          logger.warn({ tag: "monitor_skipped_lock_active" }, "scheduled monitor skip — lock held");
           return;
         }
         try {
@@ -63,7 +63,7 @@ export function startScheduler(): void {
         } catch (e) {
           logger.error(e, "scheduled monitor failed");
         } finally {
-          await releaseSchedulerLock();
+          await releaseSchedulerLock("monitor");
         }
       })();
     }, MONITOR_TICK_MS);
@@ -73,9 +73,9 @@ export function startScheduler(): void {
   const enforceExpr = env.REPRICER_CRON_ENFORCE.trim();
   if (enforceExpr && cron.validate(enforceExpr)) {
     cron.schedule(enforceExpr, async () => {
-      const ok = await acquireSchedulerLock();
+      const ok = await acquireSchedulerLock("enforce");
       if (!ok) {
-        logger.warn("enforce cron skip: lock held");
+        logger.warn({ tag: "enforce_skipped_lock_active" }, "enforce cron skip — lock held");
         return;
       }
       try {
@@ -93,7 +93,7 @@ export function startScheduler(): void {
       } catch (e) {
         logger.error(e, "scheduled enforce failed");
       } finally {
-        await releaseSchedulerLock();
+        await releaseSchedulerLock("enforce");
       }
     });
     logger.info(
@@ -106,9 +106,9 @@ export function startScheduler(): void {
 
   if (catalogSyncHourlyEnabled()) {
     cron.schedule("12 * * * *", async () => {
-      const ok = await acquireSchedulerLock();
+      const ok = await acquireSchedulerLock("catalog");
       if (!ok) {
-        logger.warn("catalog hourly sync skip: lock held");
+        logger.warn({ tag: "catalog_skipped_lock_active" }, "catalog hourly sync skip — lock held");
         return;
       }
       try {
@@ -117,7 +117,7 @@ export function startScheduler(): void {
       } catch (e) {
         logger.error(e, "scheduled catalog sync failed");
       } finally {
-        await releaseSchedulerLock();
+        await releaseSchedulerLock("catalog");
       }
     });
     logger.info("scheduler: hourly catalog sync enabled (REPRICER_CRON_CATALOG_SYNC_HOURLY)");
