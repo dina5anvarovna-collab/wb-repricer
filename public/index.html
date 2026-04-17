@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WB Repricer (MVP)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+    code { background: #f1f5f9; padding: 0.1rem 0.35rem; border-radius: 4px; font-size: 0.9em; }
+    a { color: #2563eb; }
+    h1 { font-size: 1.35rem; }
+  </style>
+</head>
+<body>
+  <h1>WB — защита минимальной цены</h1>
+  <p><a href="/admin.html"><strong>Открыть админ-панель (русский интерфейс)</strong></a></p>
+  <p>Кабинет WB + парсинг витрины (Кошелёк, регион dest), минимальная итоговая цена, автоподъём базы в WB.</p>
+  <p>REST API — порт из <code>.env</code> (по умолчанию <code>3001</code>). Статус: <a href="/health">/health</a></p>
+  <h2>Быстрые ссылки</h2>
+  <ul>
+    <li><code>GET /api/settings/status</code></li>
+    <li><code>POST /api/settings/wb-token</code> JSON <code>{"token":"..."}</code></li>
+    <li><code>POST /api/catalog/sync</code></li>
+    <li><code>GET /api/catalog/products</code></li>
+    <li><code>GET /api/regions</code> — справочник <code>dest</code> для региона</li>
+    <li><code>POST /api/fixed-prices/set</code> JSON <code>{"nmId":123,"targetPrice":999}</code></li>
+    <li><code>POST /api/monitor/run</code> JSON <code>{"maxProducts":5}</code> (регион из <code>REPRICER_WALLET_DEST</code>)</li>
+    <li><code>POST /api/jobs/enforce-prices</code> JSON <code>{"dryRun":true,"dest":"-1257786"}</code> — удержание цели; <code>dryRun:false</code> шлёт цену в кабинет WB</li>
+    <li><code>GET /api/monitor/snapshots</code></li>
+    <li><code>GET /api/cabinet-uploads</code> — история выгрузок цен</li>
+  </ul>
+  <p>Подробности — <code>README.md</code> в корне этого проекта</p>
+</body>
+</html>

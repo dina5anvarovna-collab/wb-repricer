@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WB — защита минимальной цены</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --ok: #4ade80;
+      --warn: #fbbf24;
+      --bad: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid #334155;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+    h1 { font-size: 1.15rem; margin: 0; font-weight: 600; }
+    nav {
+      display: flex; gap: 0.5rem; flex-wrap: wrap;
+      max-width: 100%;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 0.25rem;
+    }
+    nav button {
+      background: var(--card);
+      border: 1px solid #475569;
+      color: var(--text);
+      padding: 0.45rem 0.85rem;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.875rem;
+    }
+    nav button.active { border-color: var(--accent); color: var(--accent); }
+    main { padding: 1.25rem 1.5rem 3rem; max-width: 1480px; margin: 0 auto; }
+    .card {
+      background: var(--card);
+      border-radius: 12px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+      border: 1px solid #334155;
+    }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 1rem; }
+    .stat { font-size: 1.75rem; font-weight: 700; color: var(--accent); }
+    .label { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td { text-align: left; padding: 0.5rem 0.4rem; border-bottom: 1px solid #334155; vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; }
+    .products-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 1rem; }
+    .cell-regions { min-width: 220px; max-width: 420px; font-size: 0.78rem; line-height: 1.35; }
+    .reg-line {
+      padding: 0.4rem 0;
+      border-bottom: 1px solid #334155;
+    }
+    .reg-line:last-child { border-bottom: none; }
+    .reg-line .rn { color: var(--accent); font-weight: 600; display: block; margin-bottom: 0.15rem; }
+    .reg-line .rv { color: var(--muted); }
+    .muted { color: var(--muted); }
+    .regions-toolbar { margin: 0.75rem 0; }
+    .regions-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 0.65rem;
+      margin-top: 0.75rem;
+      max-height: min(60vh, 520px);
+      overflow-y: auto;
+      padding: 0.25rem;
+    }
+    @media (max-width: 640px) {
+      .regions-grid { grid-template-columns: 1fr; max-height: 55vh; }
+    }
+    .region-card {
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 0.65rem 0.75rem;
+      background: #0f172a;
+      display: flex;
+      gap: 0.5rem;
+      align-items: flex-start;
+    }
+    .region-card input { margin-top: 0.2rem; flex-shrink: 0; }
+    .region-card .nm { font-size: 0.88rem; font-weight: 500; line-height: 1.25; }
+    .region-card .ds { font-size: 0.72rem; color: var(--muted); margin-top: 0.2rem; word-break: break-all; }
+    textarea, input, select {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid #475569;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 0.6rem;
+      font-family: inherit;
+    }
+    textarea { min-height: 140px; font-family: ui-monospace, monospace; font-size: 0.8rem; }
+    .row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; margin-top: 0.75rem; }
+    .btn {
+      background: var(--accent);
+      color: #0f172a;
+      border: none;
+      padding: 0.55rem 1rem;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.875rem;
+    }
+    .btn.secondary { background: #475569; color: var(--text); }
+    .btn.danger { background: var(--bad); color: #fff; }
+    .msg { margin-top: 0.75rem; padding: 0.75rem; border-radius: 8px; font-size: 0.875rem; }
+    .msg.ok { background: #14532d; }
+    .msg.err { background: #7f1d1d; }
+    .hidden { display: none !important; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <p style="margin:0;padding:10px 16px;background:#422006;color:#fcd34d;font-size:13px;text-align:center">
+    Эта страница устарела. Основной интерфейс: соберите проект (<code>npm run build:all</code>) и откройте корень сервера <code>http://127.0.0.1:PORT/</code> или dev: <code>npm run dev:web</code> (порт 5173).
+  </p>
+  <header>
+    <h1>Защита минимальной цены WB</h1>
+    <nav id="nav">
+      <button type="button" data-tab="dash" class="active">Дашборд</button>
+      <button type="button" data-tab="conn">Подключение</button>
+      <button type="button" data-tab="products">Товары</button>
+      <button type="button" data-tab="import">Импорт CSV</button>
+      <button type="button" data-tab="jobs">Задачи</button>
+      <button type="button" data-tab="history">История</button>
+      <button type="button" data-tab="regions">Регионы</button>
+      <button type="button" data-tab="quarantine">Карантин</button>
+      <button type="button" data-tab="settings">Настройки</button>
+    </nav>
+  </header>
+  <main>
+    <section id="tab-dash" class="card">
+      <h2 style="margin-top:0;font-size:1rem;">Обзор</h2>
+      <div class="grid" id="dash-stats"></div>
+    </section>
+
+    <section id="tab-conn" class="card hidden">
+      <h2 style="margin-top:0;font-size:1rem;">API-токен продавца WB</h2>
+      <p style="color:var(--warn);font-size:0.85rem;margin:0 0 0.75rem;padding:0.5rem 0.65rem;background:#422006;border-radius:8px;border:1px solid #a16207;">
+        Откройте админку только по адресу сервера, например <strong>http://127.0.0.1:3001/admin.html</strong> — не двойным щелчком по файлу на диске (<code>file://</code>), иначе запросы к API не доходят и токен «не сохраняется».
+        Если всё же открыли файл с диска — укажите URL сервера ниже и нажмите «Запомнить».
+      </p>
+      <div class="row" style="margin-top:0;align-items:flex-end;">
+        <label style="flex:1;min-width:220px;font-size:0.85rem;color:var(--muted);">Базовый URL API (без слэша в конце)
+          <input type="url" id="api-base-input" placeholder="http://127.0.0.1:3001" style="margin-top:0.35rem;" />
+        </label>
+        <button type="button" class="btn secondary" id="btn-save-api-base">Запомнить URL</button>
+      </div>
+      <p id="api-base-hint" class="muted" style="font-size:0.78rem;margin:0.35rem 0 0.75rem;"></p>
+      <p style="color:var(--muted);font-size:0.9rem;">Нужен API-ключ категории <strong>«Цены и скидки»</strong> (личный кабинет продавца → Настройки → Доступ к API). Другие категории дадут ответ вроде «токен не поддерживается». Вставляйте ключ целиком, без кавычек. Сохранение в БД не ходит в WB; проверка — кнопками ниже, затем синхронизация.</p>
+      <textarea id="wb-token" placeholder="Вставьте токен из кабинета WB…"></textarea>
+      <div class="row">
+        <button type="button" class="btn" id="btn-save-token">Сохранить токен</button>
+        <button type="button" class="btn secondary" id="btn-test-token">Проверить токен из поля</button>
+        <button type="button" class="btn secondary" id="btn-verify-saved-token">Проверить сохранённый</button>
+        <button type="button" class="btn secondary" id="btn-sync">Синхронизировать каталог</button>
+      </div>
+      <div id="conn-msg"></div>
+    </section>
+
+    <section id="tab-products" class="card hidden">
+      <h2 style="margin-top:0;font-size:1rem;">Товары и минимальная цена</h2>
+      <div class="row">
+        <button type="button" class="btn secondary" id="btn-load-products">Обновить список</button>
+      </div>
+      <p class="muted" style="font-size:0.82rem;margin:0 0 0.5rem;">Колонка регионов заполняется после «Синк + мониторинг» (витрина). Выбранные регионы — вкладка «Регионы».</p>
+      <div class="products-wrap">
+        <table><thead><tr>
+          <th>nmID</th>
+          <th>Название</th>
+          <th>Артикул</th>
+          <th>Фикс./мин. ₽</th>
+          <th>Цена продавца ₽</th>
+          <th>Со скидкой ₽</th>
+          <th>Регионы: цена с СПП · % СПП</th>
+          <th>Контроль</th>
+        </tr></thead><tbody id="products-body"></tbody></table>
+      </div>
+    </section>
+
+    <section id="tab-import" class="card hidden">
+      <h2 style="margin-top:0;font-size:1rem;">Импорт минимальных цен (CSV)</h2>
+      <p style="color:var(--muted);font-size:0.9rem;">Формат: <code>nmId;minPrice</code> по одной строке. Заголовок можно пропустить.</p>
+      <textarea id="csv-text" placeholder="123456789;1990&#10;987654321;850"></textarea>
+      <button type="button" class="btn" id="btn-import-csv">Импортировать</button>
+      <div id="import-msg"></div>
+    </section>
+
+    <section id="tab-jobs" class="card hidden">
+      <h2 style="margin-top:0;font-size:1rem;">Запуск проверок</h2>
+      <p style="color:var(--muted);font-size:0.9rem;">Мониторинг: снимки цен (витрина + кабинет). Защита: расчёт и опционально выгрузка в WB.</p>
+      <div class="row">
+        <button type="button" class="btn secondary" id="btn-run-mon">Синк + мониторинг</button>
+        <button type="button" class="btn secondary" id="btn-enforce-dry">Защита (dry-run)</button>
+        <button type="button" class="btn danger" id="btn-enforce-real">Защита (реальная выгрузка)</button>
+      </div>
+      <p style="font-size:0.8rem;color:var(--warn);">Реальная выгрузка поднимает цену в кабинете WB. Убедитесь в min-правилах и регионе dest.</p>
+      <div id="jobs-msg"></div>
+    </section>
+
+    <section id="tab-history" class="card hidden">
+      <h2 style="margin-top:0;font-size:1rem;">История выгрузок и аудит</h2>
+      <button type="button" class="btn secondary" id="btn-load-history">Загрузить</button>
+      <pre id="history-pre" style="margin-top:1rem;font-size:0.75rem;overflow:auto;max-height:420px;"></pre>
+    </section>
+
+    <section id="tab-regions" class="card hidden">
+      <h2 style="margin-top:0;font-size:1rem;">Регионы витрины WB</h2>
+      <p style="color:var(--muted);font-size:0.88rem;line-height:1.45;">Отметьте один или несколько регионов — по ним парсится итоговая цена (СПП) на витрине. Если ничего не выбрано, используется <code>REPRICER_WALLET_DEST</code> из .env.</p>
+      <div class="regions-toolbar">
+        <input type="search" id="region-filter" placeholder="Поиск по названию или dest…" autocomplete="off" />
+      </div>
+      <div id="regions-grid" class="regions-grid" aria-label="Список регионов"></div>
+      <div class="row" style="margin-top:1rem;">
+        <button type="button" class="btn" id="btn-save-regions">Сохранить выбор регионов</button>
+      </div>
+      <div id="regions-msg"></div>
+    </section>
+
+    <section id="tab-quarantine" class="card hidden">
+      <h2 style="margin-top:0;font-size:1rem;">Карантин цен WB</h2>
+      <button type="button" class="btn secondary" id="btn-quarantine">Загрузить</button>
+      <pre id="quarantine-pre" style="margin-top:1rem;font-size:0.75rem;"></pre>
+    </section>
+
+    <section id="tab-settings" class="card hidden">
+      <h2 style="margin-top:0;font-size:1rem;">Глобальные настройки</h2>
+      <p style="color:var(--muted);font-size:0.85rem;margin:0 0 0.75rem;">Интервал мониторинга витрины (часы): сервер раз в минуту проверяет, прошло ли заданное время с последнего успешного прогона.</p>
+      <label style="display:block;margin:0.5rem 0;font-size:0.9rem;">
+        Частота мониторинга, ч
+        <input type="number" id="set-monitor-hours" min="0.25" max="168" step="0.25" style="max-width:120px;margin-top:0.35rem;" />
+      </label>
+      <p style="color:var(--muted);font-size:0.85rem;margin:0.75rem 0;">Регионы для мониторинга настраиваются на вкладке <strong>«Регионы»</strong> (адаптивная сетка, поиск).</p>
+      <label style="display:flex;align-items:center;gap:0.5rem;margin:0.75rem 0 0.5rem;">
+        <input type="checkbox" id="set-pause" /> Пауза защиты (GLOBAL_PAUSE)
+      </label>
+      <label style="display:flex;align-items:center;gap:0.5rem;margin:0.5rem 0;">
+        <input type="checkbox" id="set-estop" /> Аварийный стоп (EMERGENCY_STOP)
+      </label>
+      <button type="button" class="btn" id="btn-save-settings">Сохранить настройки</button>
+      <div id="settings-msg"></div>
+      <hr style="border-color:#334155;margin:1.5rem 0;" />
+      <h3 style="font-size:0.95rem;">Telegram (тест)</h3>
+      <p style="color:var(--muted);font-size:0.85rem;">Переменные <code>TELEGRAM_BOT_TOKEN</code>, <code>TELEGRAM_CHAT_ID</code> на сервере.</p>
+      <button type="button" class="btn secondary" id="btn-tg-test">Отправить тест</button>
+      <div id="tg-msg"></div>
+    </section>
+  </main>
+  <script>
+    const LS_API = "wb_repricer_api_base";
+
+    function getApiBase() {
+      try {
+        const q = new URLSearchParams(window.location.search).get("api");
+        if (q) {
+          const b = q.replace(/\/$/, "");
+          localStorage.setItem(LS_API, b);
+          return b;
+        }
+      } catch (e) { /* ignore */ }
+      try {
+        const s = localStorage.getItem(LS_API);
+        if (s) return s.replace(/\/$/, "");
+      } catch (e) { /* ignore */ }
+      if (location.protocol === "file:") return "http://127.0.0.1:3001";
+      return "";
+    }
+
+    function resolveApiUrl(path) {
+      if (path.startsWith("http")) return path;
+      const base = getApiBase();
+      return base ? base + path : path;
+    }
+
+    const api = (path, opt) => {
+      const o = { ...(opt || {}) };
+      delete o.headers;
+      return fetch(resolveApiUrl(path), {
+        ...o,
+        headers: { "Content-Type": "application/json" },
+      })
+        .then(async (r) => {
+          const t = await r.text();
+          let j;
+          try {
+            j = JSON.parse(t);
+          } catch {
+            j = { raw: t };
+          }
+          if (!r.ok) throw new Error(j.error || j.message || t || String(r.status));
+          return j;
+        })
+        .catch((e) => {
+          if (e instanceof TypeError && e.message === "Failed to fetch") {
+            throw new Error(
+              "Не удалось связаться с сервером. Откройте http://127.0.0.1:PORT/admin.html или задайте «Базовый URL API» и «Запомнить».",
+            );
+          }
+          throw e;
+        });
+    };
+
+    function refreshApiBaseUi() {
+      const base = getApiBase();
+      const hint = document.getElementById("api-base-hint");
+      const inp = document.getElementById("api-base-input");
+      if (inp && !inp.dataset.touched) {
+        inp.value = base || (location.protocol === "file:" ? "http://127.0.0.1:3001" : "");
+      }
+      if (hint) {
+        hint.textContent = base
+          ? "Запросы идут на: " + base
+          : "Запросы относительно этой страницы (" + location.origin + ")";
+      }
+    }
+
+    function show(el, html, ok) {
+      el.innerHTML = html ? `<div class="msg ${ok ? "ok" : "err"}">${html}</div>` : "";
+    }
+
+    function fmtRub(v) {
+      if (v == null || v === "") return "—";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "—";
+      return Math.abs(n - Math.round(n)) < 1e-6 ? String(Math.round(n)) : String(Math.round(n * 10) / 10);
+    }
+
+    function esc(s) {
+      const d = document.createElement("div");
+      d.textContent = s == null ? "" : String(s);
+      return d.innerHTML;
+    }
+
+    document.querySelectorAll("#nav button").forEach((b) => {
+      b.addEventListener("click", () => {
+        document.querySelectorAll("#nav button").forEach((x) => x.classList.remove("active"));
+        b.classList.add("active");
+        const tab = b.dataset.tab;
+        document.querySelectorAll("main > section").forEach((s) => s.classList.add("hidden"));
+        document.getElementById("tab-" + tab).classList.remove("hidden");
+        if (tab === "conn") refreshApiBaseUi();
+      });
+    });
+
+    document.getElementById("api-base-input").addEventListener("input", () => {
+      document.getElementById("api-base-input").dataset.touched = "1";
+    });
+    document.getElementById("btn-save-api-base").onclick = () => {
+      const raw = document.getElementById("api-base-input").value.trim().replace(/\/$/, "");
+      const msg = document.getElementById("conn-msg");
+      try {
+        if (raw) {
+          new URL(raw);
+          localStorage.setItem(LS_API, raw);
+        } else {
+          localStorage.removeItem(LS_API);
+        }
+        document.getElementById("api-base-input").dataset.touched = "1";
+        refreshApiBaseUi();
+        show(msg, raw ? "Адрес API сохранён в браузере." : "Сброшено: для страницы с сервера используются относительные пути.", true);
+      } catch {
+        show(msg, "Некорректный URL (пример: http://127.0.0.1:3001)", false);
+      }
+    };
+
+    async function loadDashboard() {
+      const st = await api("/api/dashboard");
+      const el = document.getElementById("dash-stats");
+      el.innerHTML = `
+        <div><div class="stat">${st.totalProducts}</div><div class="label">Товаров в базе</div></div>
+        <div><div class="stat">${st.protectionRulesEnabled}</div><div class="label">Под контролем</div></div>
+        <div><div class="stat">${st.priceRaisesToday}</div><div class="label">Выгрузок цен сегодня</div></div>
+        <div><div class="stat">${st.failedOperationsToday}</div><div class="label">Ошибок сегодня</div></div>
+      `;
+    }
+
+    document.getElementById("btn-save-token").onclick = async () => {
+      const t = document.getElementById("wb-token").value;
+      const msg = document.getElementById("conn-msg");
+      if (!t || !String(t).replace(/\s/g, "")) {
+        show(msg, "Вставьте токен в поле.", false);
+        return;
+      }
+      try {
+        await api("/api/wb/connect", { method: "POST", body: JSON.stringify({ token: t }) });
+        show(msg, "Токен сохранён (зашифрован). Нажмите «Проверить токен» для запроса к WB.", true);
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+    document.getElementById("btn-verify-saved-token").onclick = async () => {
+      const msg = document.getElementById("conn-msg");
+      try {
+        await api("/api/settings/wb-token/verify-saved", { method: "POST", body: "{}" });
+        show(msg, "Сохранённый токен успешно прошёл проверку WB.", true);
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+    document.getElementById("btn-test-token").onclick = async () => {
+      const t = document.getElementById("wb-token").value;
+      const msg = document.getElementById("conn-msg");
+      if (!t || !String(t).replace(/\s/g, "")) {
+        show(msg, "Вставьте токен или откройте сохранённый: скопируйте ключ в поле и проверьте.", false);
+        return;
+      }
+      try {
+        await api("/api/settings/wb-token/test", { method: "POST", body: JSON.stringify({ token: t }) });
+        show(msg, "Токен принят API цен WB (discounts-prices).", true);
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+    document.getElementById("btn-sync").onclick = async () => {
+      const msg = document.getElementById("conn-msg");
+      try {
+        const r = await api("/api/wb/sync", { method: "POST", body: JSON.stringify({}) });
+        let text = "Синхронизировано позиций: " + r.upserted;
+        if (r.pages != null) text += " (страниц WB: " + r.pages + ")";
+        if (r.hint) text += ". " + r.hint;
+        show(msg, text, !r.hint);
+        loadDashboard();
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+
+    function formatRegionBreakdown(rows) {
+      if (!rows || !rows.length) {
+        return '<span class="muted">Нет данных по регионам</span>';
+      }
+      return rows.map((r) => {
+        const pr = fmtRub(r.priceWithSppRub);
+        const sp = r.sppPercent != null && Number.isFinite(r.sppPercent) ? `${esc(r.sppPercent)}%` : "—";
+        return `<div class="reg-line">
+          <span class="rn">${esc(r.label)}</span>
+          <span class="rv">цена с СПП: <strong>${pr}</strong> ₽ · скидка СПП: <strong>${sp}</strong> <span class="muted">(${esc(r.dest)})</span></span>
+        </div>`;
+      }).join("");
+    }
+
+    document.getElementById("btn-load-products").onclick = async () => {
+      const body = document.getElementById("products-body");
+      body.innerHTML = "<tr><td colspan='8'>Загрузка…</td></tr>";
+      try {
+        const r = await api("/api/catalog/products?limit=200");
+        body.innerHTML = r.items.map((p) => {
+          const m = p.minPriceRule;
+          const title = (p.title || "").length > 42 ? (p.title || "").slice(0, 40) + "…" : (p.title || "—");
+          const c = m && m.controlEnabled ? "да" : (m ? "нет" : "—");
+          return `<tr>
+            <td>${p.nmId}</td>
+            <td title="${esc(p.title || "")}">${esc(title)}</td>
+            <td>${esc(p.vendorCode || "—")}</td>
+            <td>${fmtRub(p.fixedOrMinRub)}</td>
+            <td>${fmtRub(p.sellerPrice)}</td>
+            <td>${fmtRub(p.discountedPriceRub)}</td>
+            <td class="cell-regions">${formatRegionBreakdown(p.regionBreakdown)}</td>
+            <td>${c}</td>
+          </tr>`;
+        }).join("") || "<tr><td colspan='8'>Нет данных</td></tr>";
+      } catch (e) {
+        body.innerHTML = `<tr><td colspan='8'>${esc(e.message)}</td></tr>`;
+      }
+    };
+
+    document.getElementById("btn-import-csv").onclick = async () => {
+      const msg = document.getElementById("import-msg");
+      try {
+        const csv = document.getElementById("csv-text").value;
+        const r = await api("/api/min-prices/import-csv", { method: "POST", body: JSON.stringify({ csv }) });
+        show(msg, `Импортировано: ${r.imported}. Ошибки: ${(r.errors || []).length}`, true);
+        if (r.errors && r.errors.length) msg.innerHTML += `<pre style="margin-top:0.5rem;font-size:0.75rem;">${r.errors.join("\n")}</pre>`;
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+
+    document.getElementById("btn-run-mon").onclick = async () => {
+      const msg = document.getElementById("jobs-msg");
+      try {
+        const r = await api("/api/jobs/run-monitoring", { method: "POST", body: JSON.stringify({ maxProducts: 150 }) });
+        show(msg, JSON.stringify(r, null, 2), true);
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+    document.getElementById("btn-enforce-dry").onclick = async () => {
+      const msg = document.getElementById("jobs-msg");
+      try {
+        const r = await api("/api/jobs/enforce-prices", { method: "POST", body: JSON.stringify({ dryRun: true, maxProducts: 50 }) });
+        show(msg, JSON.stringify(r, null, 2), true);
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+    document.getElementById("btn-enforce-real").onclick = async () => {
+      if (!confirm("Отправить реальные цены в кабинет WB?")) return;
+      const msg = document.getElementById("jobs-msg");
+      try {
+        const r = await api("/api/jobs/enforce-prices", { method: "POST", body: JSON.stringify({ dryRun: false, maxProducts: 50 }) });
+        show(msg, JSON.stringify(r, null, 2), true);
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+
+    document.getElementById("btn-load-history").onclick = async () => {
+      try {
+        const r = await api("/api/history?limit=80");
+        document.getElementById("history-pre").textContent = JSON.stringify(r, null, 2);
+      } catch (e) {
+        document.getElementById("history-pre").textContent = e.message;
+      }
+    };
+
+    document.getElementById("btn-quarantine").onclick = async () => {
+      try {
+        const r = await api("/api/quarantine");
+        document.getElementById("quarantine-pre").textContent = JSON.stringify(r, null, 2);
+      } catch (e) {
+        document.getElementById("quarantine-pre").textContent = e.message;
+      }
+    };
+
+    let regionsCatalog = [];
+    let regionsFilterTimer = null;
+
+    async function ensureRegionsCatalog() {
+      if (regionsCatalog.length) return;
+      const r = await api("/api/regions");
+      regionsCatalog = r.items || [];
+    }
+
+    function renderRegionsGridOnce(selectedSet) {
+      const grid = document.getElementById("regions-grid");
+      if (!regionsCatalog.length) {
+        grid.innerHTML = "<p class=\"muted\">Файл data/wb-regions.json не загружен.</p>";
+        return;
+      }
+      grid.innerHTML = regionsCatalog.map((row) => {
+        const dest = String(row.dest);
+        const id = "rg-" + dest.replace(/[^a-zA-Z0-9_-]/g, "_");
+        const checked = selectedSet.has(dest) ? " checked" : "";
+        const safeAttr = dest.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+        const searchRaw = `${row.name || ""} ${dest}`.replace(/"/g, "&quot;").toLowerCase();
+        return `<div class="region-card" data-search="${searchRaw}">
+          <input type="checkbox"${checked} data-dest="${safeAttr}" id="${id}" aria-label="${esc(row.name || dest)}" />
+          <label for="${id}" style="cursor:pointer;margin:0;flex:1;">
+            <div class="nm">${esc(row.name || dest)}</div>
+            <div class="ds">dest: ${esc(dest)}</div>
+          </label>
+        </div>`;
+      }).join("");
+      applyRegionsFilter();
+    }
+
+    function applyRegionsFilter() {
+      const q = document.getElementById("region-filter").value.trim().toLowerCase();
+      document.querySelectorAll("#regions-grid .region-card").forEach((card) => {
+        const hay = (card.getAttribute("data-search") || "").toLowerCase();
+        const show = !q || hay.includes(q);
+        card.classList.toggle("hidden", !show);
+      });
+    }
+
+    async function openRegionsTab() {
+      const msg = document.getElementById("regions-msg");
+      msg.innerHTML = "";
+      try {
+        await ensureRegionsCatalog();
+        const grid = document.getElementById("regions-grid");
+        if (!grid.querySelector(".region-card")) {
+          const s = await api("/api/app/settings");
+          const sel = new Set(Array.isArray(s.SELECTED_REGION_DESTS) ? s.SELECTED_REGION_DESTS : []);
+          renderRegionsGridOnce(sel);
+        } else {
+          applyRegionsFilter();
+        }
+      } catch (e) {
+        document.getElementById("regions-grid").innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+      }
+    }
+
+    document.getElementById("region-filter").addEventListener("input", () => {
+      clearTimeout(regionsFilterTimer);
+      regionsFilterTimer = setTimeout(() => applyRegionsFilter(), 120);
+    });
+
+    document.getElementById("btn-save-regions").onclick = async () => {
+      const msg = document.getElementById("regions-msg");
+      const checkedDests = [];
+      document.querySelectorAll("#regions-grid input[type=checkbox][data-dest]").forEach((el) => {
+        if (el.checked) checkedDests.push(el.getAttribute("data-dest"));
+      });
+      try {
+        await api("/api/app/settings", {
+          method: "PATCH",
+          body: JSON.stringify({ selectedRegionDests: checkedDests }),
+        });
+        show(msg, "Регионы сохранены. Запустите мониторинг, чтобы обновить цены с СПП.", true);
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+
+    async function loadSettingsUi() {
+      const s = await api("/api/app/settings");
+      document.getElementById("set-pause").checked = s.GLOBAL_PAUSE === "true" || s.GLOBAL_PAUSE === "1";
+      document.getElementById("set-estop").checked = s.EMERGENCY_STOP === "true" || s.EMERGENCY_STOP === "1";
+      const h = s.MONITOR_INTERVAL_HOURS;
+      document.getElementById("set-monitor-hours").value =
+        typeof h === "number" && Number.isFinite(h) ? h : 1;
+    }
+    document.getElementById("btn-save-settings").onclick = async () => {
+      const msg = document.getElementById("settings-msg");
+      try {
+        const hours = parseFloat(document.getElementById("set-monitor-hours").value);
+        await api("/api/app/settings", {
+          method: "PATCH",
+          body: JSON.stringify({
+            GLOBAL_PAUSE: document.getElementById("set-pause").checked ? "true" : "false",
+            EMERGENCY_STOP: document.getElementById("set-estop").checked ? "true" : "false",
+            monitorIntervalHours: hours,
+          }),
+        });
+        show(msg, "Сохранено.", true);
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+    document.getElementById("btn-tg-test").onclick = async () => {
+      const msg = document.getElementById("tg-msg");
+      try {
+        const r = await api("/api/notifications/telegram-test", { method: "POST", body: JSON.stringify({ text: "Тест WB Min Price Guard" }) });
+        show(msg, JSON.stringify(r, null, 2), r.ok !== false);
+      } catch (e) { show(msg, String(e.message), false); }
+    };
+
+    document.querySelector('[data-tab="regions"]').addEventListener("click", () => {
+      openRegionsTab();
+    });
+
+    document.querySelector('[data-tab="settings"]').addEventListener("click", () => {
+      loadSettingsUi().catch(() => {});
+    });
+
+    refreshApiBaseUi();
+    loadDashboard().catch(() => {});
+    loadSettingsUi().catch(() => {});
+  </script>
+</body>
+</html>

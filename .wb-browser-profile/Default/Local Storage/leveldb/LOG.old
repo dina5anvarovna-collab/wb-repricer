@@ -1,0 +1,15 @@
+2026/04/17-16:16:41.455 b416d8 Reusing MANIFEST /Users/dinakasaeva/Downloads/WB_Repricer/.wb-browser-profile/Default/Local Storage/leveldb/MANIFEST-000001
+2026/04/17-16:16:41.469 b416d8 Recovering log #99
+2026/04/17-16:16:41.470 b416d8 Reusing old log /Users/dinakasaeva/Downloads/WB_Repricer/.wb-browser-profile/Default/Local Storage/leveldb/000099.log 
+2026/04/17-16:17:41.485 b416db Level-0 table #103: started
+2026/04/17-16:17:41.499 b416db Level-0 table #103: 131291 bytes OK
+2026/04/17-16:17:41.503 b416db Delete type=0 #99
+2026/04/17-16:17:41.505 b416d8 Compacting 4@0 + 1@1 files
+2026/04/17-16:17:41.517 b416d8 Generated table #104@0: 58 keys, 261051 bytes
+2026/04/17-16:17:41.518 b416d8 Compacted 4@0 + 1@1 files => 261051 bytes
+2026/04/17-16:17:41.520 b416d8 compacted to: files[ 0 1 0 0 0 0 0 ]
+2026/04/17-16:17:41.522 b416d8 Delete type=2 #103
+2026/04/17-16:17:41.522 b416d8 Delete type=2 #100
+2026/04/17-16:17:41.522 b416d8 Delete type=2 #98
+2026/04/17-16:17:41.522 b416d8 Delete type=2 #94
+2026/04/17-16:17:41.522 b416d8 Delete type=2 #96

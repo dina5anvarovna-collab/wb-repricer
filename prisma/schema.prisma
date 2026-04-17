@@ -1,0 +1,349 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model SellerCabinet {
+  id             String   @id @default(cuid())
+  name           String   @default("default")
+  tokenEncrypted String
+  tokenLast4     String
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  products WbProduct[]
+}
+
+model BuyerSession {
+  id             String    @id @default(cuid())
+  profileDir     String
+  isAuthorized   Boolean   @default(false)
+  lastCheckedAt  DateTime?
+  lastSuccessAt  DateTime?
+  /** Последняя успешная DOM-проверка цены (любой товар) */
+  lastDomSuccessAt DateTime?
+  status         String    @default("invalid") // pending_login | active | expired | invalid
+  notes          String?
+  /** Последний полный buyer probe (карточка + куки + при наличии card API) */
+  lastValidatedAt    DateTime?
+  lastProbeOk        Boolean   @default(false)
+  lastProbeReason    String?
+  lastStorageExportAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model WbProduct {
+  id                   String   @id @default(cuid())
+  cabinetId            String
+  nmId                 Int
+  vendorCode           String?
+  brand                String?
+  title                String
+  subjectName          String?
+  sellerPrice          Float?
+  sellerDiscount       Int?
+  /** Цена после обычной скидки (оценка из кабинета: base * (1 - discount/100)) */
+  discountedPriceRub   Float?
+  stock                Int?
+  isActive             Boolean  @default(true)
+  /** Участие в buyer-парсинге (мониторинг DOM/витрина). Выключите для товаров вне фокуса — ускоряет прогон. */
+  buyerParseEnabled    Boolean  @default(true)
+  /** Когда карточка последний раз обогащена из Content API */
+  contentEnrichedAt    DateTime?
+  /** Сводка последнего мониторинга (основной регион) */
+  lastMonitorAt              DateTime?
+  lastMonitorRegionDest      String?
+  /** Последний итог WB Кошелёк (или подставленный итог витрины) с основного региона */
+  lastWalletObservedRub      Float?
+  /** Последняя «цена с СПП без кошелька», если отличалась от кошелька */
+  lastRegularObservedRub     Float?
+  lastParseConfidence        Float?
+  /** wallet_found | only_regular_found | parse_failed | auth_required | blocked_or_captcha | unavailable */
+  lastWalletParseStatus      String?
+  /** ok | below_min | no_target | parse_failed | auth_problem | skipped | needs_review */
+  lastEvaluationStatus       String?
+  /** Последняя известная витринная (обычная) цена покупателя, ₽ — кэш при «нет в наличии» */
+  lastKnownShowcaseRub       Float?
+  /** Последняя известная цена WB Кошелёк, ₽ */
+  lastKnownWalletRub         Float?
+  /** Когда товар последний раз был в наличии по данным кабинета/DOM */
+  lastSeenInStock            DateTime?
+  /** Откуда взяты последние сохранённые цены: dom | fallback_cache | fallback_cabinet | mixed */
+  lastPriceSource            String?
+  lastPriceSeenAt            DateTime?
+  updatedAt            DateTime @updatedAt
+
+  cabinet         SellerCabinet        @relation(fields: [cabinetId], references: [id], onDelete: Cascade)
+  fixedPrices     FixedTargetPrice[]
+  snapshots       PriceSnapshot[]
+  cabinetUploads  CabinetPriceUpload[]
+  minPriceRule    MinPriceRule?
+  minPriceHistory MinPriceTargetHistory[]
+  priceHistory    ProductPriceRecord[]
+  stockLines      ProductStockLine[]
+
+  @@unique([cabinetId, nmId])
+  @@index([cabinetId])
+}
+
+/// Учётные сессии: токен продавца (метаданные) + браузер покупателя (профиль / storageState)
+model AuthSession {
+  id               String    @id @default(cuid())
+  kind             String    @unique // seller_api | buyer_browser
+  status           String    @default("unknown") // active | expired | invalid | unknown
+  lastValidatedAt  DateTime?
+  lastRefreshAt    DateTime?
+  lastCookieExportAt DateTime?
+  lastError        String?
+  storageStatePath String?
+  profileDir       String?
+  metaJson         String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+/// История цен после синхронизаций (кабинет + при необходимости оценка итога)
+model ProductPriceRecord {
+  id               String   @id @default(cuid())
+  productId        String
+  nmId             Int
+  sellerPrice      Float?
+  discountedPrice  Float?
+  buyerFinalRub    Float?
+  sppPercent       Float?
+  source           String   @default("catalog_sync")
+  createdAt        DateTime @default(now())
+
+  product WbProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, createdAt])
+  @@index([nmId])
+}
+
+/// Остатки по складам или агрегат «всего» на момент съёмки
+model ProductStockLine {
+  id            String   @id @default(cuid())
+  productId     String
+  nmId          Int
+  warehouseId   String   @default("total")
+  warehouseName String   @default("Всего")
+  quantity      Int
+  capturedAt    DateTime @default(now())
+
+  product WbProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, capturedAt])
+  @@index([nmId])
+}
+
+/// Журнал запусков синхронизации (ручной / cron)
+model SyncRunLog {
+  id           String    @id @default(cuid())
+  scope        String // all | stocks | prices
+  status       String    @default("running") // running | done | failed
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  message      String?
+  metaJson     String?
+  errorMessage String?
+
+  @@index([startedAt])
+}
+
+/// Правило минимальной итоговой цены (защита «не ниже min» для покупателя)
+model MinPriceRule {
+  id                           String    @id @default(cuid())
+  productId                    String    @unique
+  minAllowedFinalPrice         Float
+  controlEnabled               Boolean   @default(true)
+  roundingMode                 String    @default("integer")
+  safetyBufferPercent          Float     @default(2)
+  maxIncreasePercentPerCycle   Float     @default(20)
+  maxIncreaseAbsolute          Float     @default(5000)
+  cooldownMinutes              Int       @default(45)
+  minChangeThreshold           Float     @default(5)
+  priceStepRub                 Float?
+  comment                      String?
+  lastSuccessfulRaiseAt        DateTime?
+  lastCheckAt                  DateTime?
+  /** Код причины последнего расчёта (см. reasonCodes в коде) */
+  lastReasonCode               String?
+  lastEvaluationSummary      String?
+  createdAt                    DateTime  @default(now())
+  updatedAt                    DateTime  @updatedAt
+
+  product WbProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  createdAt    DateTime @default(now())
+  actor        String   @default("system")
+  action       String
+  entityType   String
+  entityId     String?
+  dryRun       Boolean  @default(false)
+  requestJson  String?
+  responseJson String?
+  metaJson     String?
+
+  @@index([createdAt])
+  @@index([action])
+}
+
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model FixedTargetPrice {
+  id            String   @id @default(cuid())
+  productId     String
+  nmId          Int
+  targetPrice   Float
+  currency      String   @default("RUB")
+  source        String   @default("manual") // manual | import | api
+  effectiveFrom DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  product WbProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([nmId])
+  @@index([productId])
+}
+
+model PriceSnapshot {
+  id                 String   @id @default(cuid())
+  productId          String
+  nmId               Int
+  sellerPrice        Float?
+  /** Покупатель: цена с СПП без WB Кошелька (модалка / DOM regular, не дубль итога витрины) */
+  buyerRegularPrice  Float?
+  /** Покупатель: WB Кошелёк; при отсутствии строки в DOM может совпадать с итогом витрины по правилам монитора */
+  buyerWalletPrice   Float?
+  /** Оценка цены со скидкой продавца на момент снимка (из кабинета) */
+  sellerDiscountedSnapshotRub Float?
+  walletSource       String   @default("unavailable") // dom | unavailable
+  fixedTargetPrice   Float?
+  diffSellerVsTarget Float?
+  diffWalletVsTarget Float?
+  regionDest         String?
+  regionLabel        String?
+  parsedAt           DateTime @default(now())
+  syncJobId          String
+  status             String   @default("ok") // ok | warning | error (legacy)
+  errorMessage       String?
+  /** 0..1 уверенность парсинга кошелька */
+  parseConfidence    Float?
+  /** Стратегия: wallet_line | json_ld | basket_api_hint | text_scan */
+  parseMethod        String?
+  walletParseStatus  String?
+  evaluationStatus   String?
+  /** JSON: формула, diff, флаги */
+  detailJson         String?
+
+  product WbProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  job     SyncJob   @relation(fields: [syncJobId], references: [id], onDelete: Cascade)
+
+  @@index([syncJobId])
+  @@index([nmId])
+  @@index([productId, parsedAt])
+}
+
+/// Попытка выставить цену в кабинете WB (API discounts-prices upload)
+model CabinetPriceUpload {
+  id                  String   @id @default(cuid())
+  productId           String
+  nmId                Int
+  previousPriceRub    Float?
+  newPriceRub         Float
+  discountPercent     Int
+  targetPriceRub      Float
+  observedWalletRub   Float?
+  observedRegularRub  Float?
+  regionDest          String?
+  regionLabel         String?
+  wbTaskId            Int?
+  dryRun              Boolean  @default(false)
+  status              String // dry_run | submitted | failed
+  errorMessage        String?
+  /** target_met | below_min_raise_proposed | skipped_* | ... */
+  reasonCode          String?
+  engineDetailJson    String?
+  parseConfidence     Float?
+  syncJobId           String?
+  createdAt           DateTime @default(now())
+
+  product WbProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  job     SyncJob?  @relation(fields: [syncJobId], references: [id], onDelete: SetNull)
+
+  @@index([nmId])
+  @@index([createdAt])
+  @@index([syncJobId])
+}
+
+model SyncJob {
+  id           String    @id @default(cuid())
+  type         String // catalog | monitor | enforce | full
+  status       String    @default("running") // running | done | failed
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  errorMessage String?
+  meta         String? // JSON
+
+  snapshots       PriceSnapshot[]
+  cabinetUploads  CabinetPriceUpload[]
+}
+
+model SchedulerLock {
+  id        String   @id @default("singleton")
+  lockedBy  String?
+  lockedAt  DateTime?
+  expiresAt DateTime?
+}
+
+/// История изменений целевой минимальной цены (аудит)
+model MinPriceTargetHistory {
+  id            String   @id @default(cuid())
+  productId     String
+  nmId          Int
+  previousMin   Float?
+  newMin        Float
+  source        String   @default("ui") // ui | api | csv | import | bulk
+  batchId       String?
+  actor         String   @default("user")
+  createdAt     DateTime @default(now())
+
+  product WbProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId])
+  @@index([createdAt])
+}
+
+/// Массовая операция (импорт, bulk min)
+model MassUpdateBatch {
+  id          String   @id @default(cuid())
+  kind        String
+  itemCount   Int      @default(0)
+  metaJson    String?
+  createdAt   DateTime @default(now())
+}
+
+/// События UI / API для трассировки
+model UiAuditTrail {
+  id         String   @id @default(cuid())
+  action     String
+  path       String?
+  payloadJson String?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+}

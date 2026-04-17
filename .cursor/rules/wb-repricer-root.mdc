@@ -1,0 +1,11 @@
+---
+description: WB_Repricer — только контроль цен (без прибыли)
+alwaysApply: true
+---
+
+# Корень разработки: WB_Repricer
+
+- Рабочий каталог: **WB_Repricer** (`/Users/dinakasaeva/Downloads/WB_Repricer`).
+- **Продукт этой папки:** парсинг цен (seller API + DOM «Кошелёк», регион `dest`), целевые цены, мониторинг, **удержание цены** (upload в кабинет WB). **Не** юнит-экономика, **не** прибыль — см. `docs/PROJECT_BOUNDARY.md`.
+- Логика repricer (API, Prisma, мониторинг, cron) и **Playwright wallet CLI** (`src/walletDom/`) — **только здесь**.
+- Копии в `WB_Profit_Ready` / WB Price Guard не дублировать правками; синк в другой проект — по решению пользователя.
