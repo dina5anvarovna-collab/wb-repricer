@@ -23,6 +23,25 @@ export type DetectBlockInput = {
   mainResponseStatus?: number | null;
 };
 
+/**
+ * Карточка товара WB в DOM — приоритетнее «сырого» HTTP (например 498 у CDN).
+ * Не заменяет проверку капчи/anti-bot: их нужно выполнять раньше.
+ */
+export function looksLikeWildberriesProductDetailPage(bodyText: string, pageUrl: string): boolean {
+  const t = bodyText.slice(0, 28_000);
+  const u = pageUrl.toLowerCase();
+  if (!/\/catalog\/\d+\//i.test(u)) return false;
+  if (!/(₽|руб)/i.test(t)) return false;
+  if (t.length < 80) return false;
+  return (
+    /(в корзину|добавить в корзину|купить сейчас)/i.test(t) ||
+    /артикул/i.test(t) ||
+    /характеристик/i.test(t) ||
+    /рейтинг|отзыв/i.test(t) ||
+    /wildberries/i.test(t)
+  );
+}
+
 export function detectPublicParseBlockSignals(input: DetectBlockInput): {
   reason: PublicParseBlockReason;
   legacyParseStatus: "blocked_or_captcha" | "auth_required" | null;
@@ -31,9 +50,6 @@ export function detectPublicParseBlockSignals(input: DetectBlockInput): {
   const t = input.bodyText.slice(0, 14_000);
 
   const status = input.mainResponseStatus;
-  if (typeof status === "number" && (status >= 400 || status === 0)) {
-    return { reason: "http_error", legacyParseStatus: null };
-  }
 
   if (/капч|captcha|вы\s+робот|подтвердите,\s*что\s+вы\s+не\s+робот|smartcaptcha/i.test(t)) {
     return { reason: "captcha", legacyParseStatus: "blocked_or_captcha" };
@@ -65,8 +81,17 @@ export function detectPublicParseBlockSignals(input: DetectBlockInput): {
     return { reason: "unexpected_redirect", legacyParseStatus: "blocked_or_captcha" };
   }
 
+  /** DOM-карточка товара: не считаем ответ ошибкой только из-за статуса (498 и т.д.). */
+  if (looksLikeWildberriesProductDetailPage(input.bodyText, input.pageUrl)) {
+    return { reason: "ok", legacyParseStatus: null };
+  }
+
   if (t.length < 120 && !/wildberries|wb\.ru/i.test(t)) {
     return { reason: "page_blocked", legacyParseStatus: "blocked_or_captcha" };
+  }
+
+  if (typeof status === "number" && (status >= 400 || status === 0)) {
+    return { reason: "http_error", legacyParseStatus: null };
   }
 
   return { reason: "ok", legacyParseStatus: null };

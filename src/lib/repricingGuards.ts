@@ -49,14 +49,19 @@ export function walletParseNumericConfidence(input: {
   if (
     input.parseStatus === "parse_failed" ||
     input.parseStatus === "auth_required" ||
-    input.parseStatus === "blocked_or_captcha"
+    input.parseStatus === "blocked_or_captcha" ||
+    input.parseStatus === "loaded_no_price"
   ) {
     return CONF_FAILED;
   }
   if (input.popupParsed || input.priceParseSource === "popup_dom") {
     return CONF_POPUP_DOM;
   }
-  if (input.partialDom || input.parseStatus === "only_regular_found") {
+  if (
+    input.partialDom ||
+    input.parseStatus === "only_regular_found" ||
+    input.parseStatus === "loaded_showcase_only"
+  ) {
     return CONF_PARTIAL_DOM;
   }
 

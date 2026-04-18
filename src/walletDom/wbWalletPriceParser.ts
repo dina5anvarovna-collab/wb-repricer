@@ -434,6 +434,8 @@ export type WalletParserInput = {
 export type WalletParseStatus =
   | "wallet_found"
   | "only_regular_found"
+  | "loaded_showcase_only"
+  | "loaded_no_price"
   | "parse_failed"
   | "auth_required"
   | "blocked_or_captcha";
@@ -480,6 +482,8 @@ export type WalletParserResult = {
   walletIconDetected?: boolean;
   /** Wallet-specific кандидат цены (productLinePriceWallet). */
   showcaseWalletPriceCandidate?: number | null;
+  /** Нижняя «витринная» цена при двух ценах рядом с покупкой (не кошелёк без подтверждения). */
+  showcaseVitrineRub?: number | null;
   /** Первая видимая строка цены после открытия карточки (debug/forensic). */
   firstVisiblePriceText?: string | null;
   /** Принятая из DOM цена кошелька до source-orchestrator. */
@@ -699,36 +703,62 @@ function buildWalletResult(input: {
 }): WalletParserResult {
   const { nmId, url, region, dom, jsonHint } = input;
   const jsonRef = jsonHint.offer ?? jsonHint.aggregate ?? null;
-  let parseStatus: WalletParseStatus = "parse_failed";
-  let sourceConfidence = 0.2;
-  let parseMethod = "none";
 
-  const walletCandidate =
-    dom.walletIconDetected && dom.showcaseWalletPriceCandidate != null && dom.showcaseWalletPriceCandidate > 0
+  const classWalletRub =
+    dom.showcaseWalletPriceCandidate != null && dom.showcaseWalletPriceCandidate > 0
       ? dom.showcaseWalletPriceCandidate
-      : dom.walletPrice != null && dom.walletPrice > 0
-        ? dom.walletPrice
-        : null;
-  const hasWalletLine = walletCandidate != null;
-  const hasRegular = dom.regularPrice != null && dom.regularPrice > 0;
+      : null;
+  const lineWalletRub =
+    dom.walletPrice != null && dom.walletPrice > 0 ? dom.walletPrice : null;
+  /** Рядом с ценой есть иконка кошелька — берём нижнюю витринную цену как WB Кошелёк. */
+  const iconWalletRub =
+    dom.walletIconDetected === true &&
+    dom.showcaseVitrineRub != null &&
+    dom.showcaseVitrineRub > 0
+      ? dom.showcaseVitrineRub
+      : null;
+
+  const walletCandidate: number | null =
+    classWalletRub ?? lineWalletRub ?? iconWalletRub ?? null;
+
   const walletFromRedLeftLayout =
     dom.walletDomHint === "red_left_spp_pair" &&
     Boolean(dom.walletLine?.includes("красная цена слева"));
 
-  if (hasWalletLine) {
+  const hasRegularDom = dom.regularPrice != null && dom.regularPrice > 0;
+  const priceRegular =
+    dom.regularPrice ?? (jsonRef != null && !hasRegularDom ? jsonRef : null);
+
+  const hasShowcaseVitrine =
+    dom.showcaseVitrineRub != null && dom.showcaseVitrineRub > 0;
+  const hasNumericPrice =
+    (priceRegular != null && priceRegular > 0) ||
+    hasShowcaseVitrine ||
+    (jsonRef != null && jsonRef > 0);
+
+  let parseStatus: WalletParseStatus = "parse_failed";
+  let sourceConfidence = 0.2;
+  let parseMethod = "none";
+
+  if (walletCandidate != null) {
     parseStatus = "wallet_found";
     if (walletFromRedLeftLayout) {
       parseMethod = "wallet_red_left_spp_pair";
       sourceConfidence = 0.72;
+    } else if (iconWalletRub != null && classWalletRub == null && lineWalletRub == null) {
+      parseMethod = "wallet_wallet_icon_near_price";
+      sourceConfidence = 0.82;
     } else {
       parseMethod = "wallet_line+text_scan";
       sourceConfidence = 0.78;
     }
-    if (jsonRef != null && Math.abs(jsonRef - walletCandidate) / jsonRef < 0.03) {
+    if (
+      jsonRef != null &&
+      walletCandidate != null &&
+      Math.abs(jsonRef - walletCandidate) / jsonRef < 0.03
+    ) {
       sourceConfidence = Math.min(0.95, sourceConfidence + 0.12);
-      parseMethod = walletFromRedLeftLayout
-        ? "wallet_red_left_spp_pair+json_ld_confirm"
-        : "wallet_line+json_ld_confirm";
+      parseMethod = `${parseMethod}+json_ld_confirm`;
     }
     if (walletCandidate != null && dom.regularPrice != null && walletCandidate < dom.regularPrice) {
       sourceConfidence = Math.min(0.93, sourceConfidence + 0.05);
@@ -736,27 +766,49 @@ function buildWalletResult(input: {
     if (dom.walletDomHint === "red_left_spp_pair" && !walletFromRedLeftLayout) {
       parseMethod = `${parseMethod};regular_from_spp_pair_layout`;
     }
-  } else if (hasRegular) {
-    const reg = dom.regularPrice!;
-    parseStatus = "only_regular_found";
-    parseMethod = "text_scan_regular";
-    sourceConfidence = 0.55;
-    if (jsonRef != null && Math.abs(jsonRef - reg) / jsonRef < 0.04) {
-      sourceConfidence = Math.min(0.72, sourceConfidence + 0.1);
-      parseMethod = "text_scan+json_ld";
+  } else if (hasNumericPrice) {
+    if (hasShowcaseVitrine) {
+      parseStatus = "loaded_showcase_only";
+      parseMethod = "dual_price_showcase_dom";
+      sourceConfidence = 0.74;
+      if (
+        jsonRef != null &&
+        dom.showcaseVitrineRub != null &&
+        Math.abs(jsonRef - dom.showcaseVitrineRub) / jsonRef < 0.05
+      ) {
+        sourceConfidence = Math.min(0.84, sourceConfidence + 0.06);
+        parseMethod = "dual_price_showcase_dom+json_ld";
+      }
+    } else if (hasRegularDom || (priceRegular != null && priceRegular > 0)) {
+      const reg = dom.regularPrice ?? priceRegular!;
+      parseStatus = "only_regular_found";
+      parseMethod = "text_scan_regular";
+      sourceConfidence = 0.55;
+      if (jsonRef != null && Math.abs(jsonRef - reg) / jsonRef < 0.04) {
+        sourceConfidence = Math.min(0.72, sourceConfidence + 0.1);
+        parseMethod = "text_scan+json_ld";
+      }
+    } else if (jsonRef != null) {
+      parseStatus = "only_regular_found";
+      parseMethod = "json_ld_fallback";
+      sourceConfidence = 0.42;
     }
-  } else if (jsonRef != null) {
-    parseStatus = "only_regular_found";
-    parseMethod = "json_ld_fallback";
-    sourceConfidence = 0.42;
+  } else {
+    const pageLooksLoaded =
+      dom.inStock !== null ||
+      dom.lines.length >= 12 ||
+      (dom.priceBlockHtml?.length ?? 0) > 140;
+    if (pageLooksLoaded) {
+      parseStatus = "loaded_no_price";
+      parseMethod = "dom_loaded_no_price";
+      sourceConfidence = 0.18;
+    }
   }
 
-  const priceRegular = dom.regularPrice ?? (jsonRef != null && !hasRegular ? jsonRef : null);
-
-  let priceWalletResolved = hasWalletLine ? walletCandidate : null;
+  let priceWalletResolved = walletCandidate != null ? walletCandidate : null;
   if (
     priceWalletResolved != null &&
-    dom.showcaseWalletPriceCandidate == null &&
+    classWalletRub == null &&
     priceRegular != null &&
     Number.isFinite(priceRegular) &&
     priceRegular > 0 &&
@@ -764,8 +816,8 @@ function buildWalletResult(input: {
   ) {
     priceWalletResolved = null;
     if (parseStatus === "wallet_found") {
-      parseStatus = "only_regular_found";
-      sourceConfidence = Math.min(sourceConfidence, 0.58);
+      parseStatus = hasShowcaseVitrine ? "loaded_showcase_only" : "only_regular_found";
+      sourceConfidence = Math.min(sourceConfidence, hasShowcaseVitrine ? 0.76 : 0.58);
       parseMethod = `${parseMethod};wallet_rejected_gt_regular`;
     }
   }
@@ -792,6 +844,7 @@ function buildWalletResult(input: {
     parseStatus,
     sourceConfidence,
     parseMethod,
+    showcaseVitrineRub: dom.showcaseVitrineRub ?? null,
   };
 }
 
@@ -1274,6 +1327,8 @@ async function extractDomSignals(page: Page): Promise<{
   walletIconDetected: boolean;
   /** Витринная цена «с WB кошельком» (productLinePriceWallet). Единственный источник истины для walletPriceRub. */
   showcaseWalletPriceCandidate: number | null;
+  /** Меньшая цена рядом с «купить» при двух видимых ценах (витрина; не автоматически кошелёк). */
+  showcaseVitrineRub: number | null;
 }> {
   const payload = await page.evaluate(() => {
     function parseLeafRub(raw: string): number | null {
@@ -1535,6 +1590,11 @@ async function extractDomSignals(page: Page): Promise<{
       }
     }
 
+    const dualNearBuyMinRub =
+      sortedVals.length >= 2 ? sortedVals[0]! : null;
+    const dualNearBuyMaxRub =
+      sortedVals.length >= 2 ? sortedVals[sortedVals.length - 1]! : null;
+
     const walletIconSelectors = [
       '[class*="wallet" i]',
       '[class*="Wallet"]',
@@ -1616,6 +1676,8 @@ async function extractDomSignals(page: Page): Promise<{
       redLeftWalletRub,
       pairRightRub,
       buyBlockRegularRub,
+      dualNearBuyMinRub,
+      dualNearBuyMaxRub,
       hasExplicitWalletMarker,
       redLeftPairNearBuy,
       walletIconDetected,
@@ -1650,7 +1712,11 @@ async function extractDomSignals(page: Page): Promise<{
     redLeft !== pairRight
   ) {
     walletDomHint = "red_left_spp_pair";
-    if (walletPrice == null && (payload.hasExplicitWalletMarker || payload.redLeftPairNearBuy)) {
+    /** Без текста «кошелёк» / иконки не подставляем цену в priceWallet (ложные срабатывания). */
+    if (
+      walletPrice == null &&
+      (payload.hasExplicitWalletMarker === true || payload.walletIconDetected === true)
+    ) {
       walletPrice = redLeft;
       walletLine = "WB Кошелёк (красная цена слева от цены со СПП)";
     }
@@ -1686,6 +1752,25 @@ async function extractDomSignals(page: Page): Promise<{
   if (walletDomHint != null && pairRight != null) {
     regularPrice = pairRight;
   }
+
+  const dualMin =
+    typeof payload.dualNearBuyMinRub === "number" &&
+    Number.isFinite(payload.dualNearBuyMinRub) &&
+    payload.dualNearBuyMinRub > 0
+      ? Math.round(payload.dualNearBuyMinRub)
+      : null;
+  const dualMax =
+    typeof payload.dualNearBuyMaxRub === "number" &&
+    Number.isFinite(payload.dualNearBuyMaxRub) &&
+    payload.dualNearBuyMaxRub > 0
+      ? Math.round(payload.dualNearBuyMaxRub)
+      : null;
+  let showcaseVitrineRub: number | null = null;
+  if (dualMin != null && dualMax != null && dualMin < dualMax) {
+    regularPrice = dualMax;
+    showcaseVitrineRub = dualMin;
+  }
+
   const inStock = /нет в наличии/i.test(payload.bodyText)
     ? false
     : /(добавить в корзину|купить сейчас|в корзину)/i.test(payload.bodyText)
@@ -1716,6 +1801,7 @@ async function extractDomSignals(page: Page): Promise<{
       payload.showcaseWalletPriceCandidate > 0
         ? Math.round(payload.showcaseWalletPriceCandidate)
         : null,
+    showcaseVitrineRub,
   };
 }
 
@@ -2077,6 +2163,7 @@ async function scrapeWalletPriceOnPage(
         };
       }
     }
+
     logger.info(
       {
         tag: "wb-wallet-forensic",
@@ -2084,6 +2171,7 @@ async function scrapeWalletPriceOnPage(
         phase: "dom_signals_initial",
         walletIconFound: preDom.walletIconDetected,
         visibleShowcaseCandidateRub: preDom.showcaseWalletPriceCandidate,
+        vitrineRub: preDom.showcaseVitrineRub ?? null,
         domRegularRub: preDom.regularPrice,
         rawPriceBlockText: (preDom as any).priceBlockTexts ?? null,
         priceNodes: (preDom as any).priceNodesDebug ?? [],
@@ -2091,11 +2179,18 @@ async function scrapeWalletPriceOnPage(
       "forensic: initial DOM signals for wallet selector",
     );
 
-    const showcaseRubFromDom = preDom.showcaseWalletPriceCandidate ?? null;
+    let result = buildWalletResult({
+      nmId,
+      url,
+      region: input.region ?? null,
+      dom: preDom,
+      jsonHint,
+    });
+
+    const showcaseRubFromDom =
+      preDom.showcaseVitrineRub ?? preDom.showcaseWalletPriceCandidate ?? null;
     const walletPriceFromDom =
-      preDom.walletIconDetected === true && showcaseRubFromDom != null && showcaseRubFromDom > 0
-        ? showcaseRubFromDom
-        : null;
+      result.priceWallet != null && result.priceWallet > 0 ? result.priceWallet : null;
     const forensicDecision = {
       nmId,
       rawPriceBlockText: (preDom as any).priceBlockTexts ?? null,
@@ -2145,13 +2240,6 @@ async function scrapeWalletPriceOnPage(
     const dom = preDom;
     await saveArtifacts(page, nmId, dom.lines, dom.priceBlockHtml, dedupe([...networkUrls]));
 
-    let result = buildWalletResult({
-      nmId,
-      url,
-      region: input.region ?? null,
-      dom,
-      jsonHint,
-    });
     if (dom.oldPriceRub != null) {
       result = { ...result, oldPriceRub: dom.oldPriceRub };
     }
@@ -2185,15 +2273,25 @@ async function scrapeWalletPriceOnPage(
         break;
       }
     }
+    const showcaseCandidateForVerify =
+      preDom.showcaseWalletPriceCandidate ??
+      (preDom.walletIconDetected === true ? preDom.showcaseVitrineRub : null);
+
     const buyerPriceVerification = computeBuyerPriceVerification({
       sellerBasePriceRub: null,
-      showcaseWalletPriceCandidate: showcaseRubFromDom,
+      showcaseWalletPriceCandidate: showcaseCandidateForVerify,
       walletIconDetected: preDom.walletIconDetected,
       cardApiShowcaseRub: cardRubFromPageNetwork,
       cardApiWalletRub: cardWalletRub,
     });
     result = {
       ...result,
+      showcaseRubEffective:
+        result.priceWallet ??
+        preDom.showcaseVitrineRub ??
+        result.discountedPrice ??
+        result.priceRegular ??
+        null,
       cardApiShowcaseRub: cardRubFromPageNetwork,
       cardApiWalletRub: cardWalletRub,
       showcaseRubFromCardApi: cardRubFromPageNetwork,
@@ -2235,8 +2333,12 @@ async function scrapeWalletPriceOnPage(
       "buyer DOM wallet verification summary",
     );
 
-    if (result.parseStatus === "parse_failed") {
-      await logBlankPageDiagnostics(page, resolved.label, "parse-failed");
+    if (result.parseStatus === "parse_failed" || result.parseStatus === "loaded_no_price") {
+      await logBlankPageDiagnostics(
+        page,
+        resolved.label,
+        result.parseStatus === "loaded_no_price" ? "loaded-no-price" : "parse-failed",
+      );
     }
 
     const snippetFinal = (await page.innerText("body").catch(() => "")).slice(0, 4096);
@@ -2276,6 +2378,7 @@ async function scrapeWalletPriceOnPage(
     const okDom =
       out.parseStatus === "wallet_found" ||
       out.parseStatus === "only_regular_found" ||
+      out.parseStatus === "loaded_showcase_only" ||
       (out.priceRegular != null && out.priceRegular > 0);
     logger.info(
       {
@@ -2479,6 +2582,7 @@ export function inferWalletPriceParseSource(input: {
 
   const domRegularOk =
     p.parseStatus === "only_regular_found" ||
+    p.parseStatus === "loaded_showcase_only" ||
     (p.priceRegular != null && Number.isFinite(p.priceRegular) && p.priceRegular > 0);
 
   const popupFixedWallet =
@@ -2486,7 +2590,9 @@ export function inferWalletPriceParseSource(input: {
     popupWalletRub != null &&
     popupWalletRub > 0 &&
     !domWalletOk &&
-    (p.parseStatus === "parse_failed" || p.parseStatus === "only_regular_found");
+    (p.parseStatus === "parse_failed" ||
+      p.parseStatus === "only_regular_found" ||
+      p.parseStatus === "loaded_showcase_only");
 
   if (popupFixedWallet) {
     return "popup_dom";

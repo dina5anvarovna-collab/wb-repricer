@@ -178,7 +178,11 @@ export async function checkBuyerSession(
       browser: resolveWalletDomBrowserKind(),
     });
 
-    if (probe.parseStatus === "wallet_found" || probe.parseStatus === "only_regular_found") {
+    if (
+      probe.parseStatus === "wallet_found" ||
+      probe.parseStatus === "only_regular_found" ||
+      probe.parseStatus === "loaded_showcase_only"
+    ) {
       logger.info(
         { tag: "buyer_session_valid", profileDir, detail: "wallet_probe_ok", parseStatus: probe.parseStatus },
         "buyer session valid — wallet probe succeeded",

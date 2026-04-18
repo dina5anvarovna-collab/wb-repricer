@@ -77,7 +77,12 @@ function walletStepNeedsRecovery(sl: StockLevel, dom: BuyerDomResult): boolean {
   if (ps === "parse_failed" || ps === "blocked_or_captcha" || ps === "auth_required") {
     return true;
   }
-  if (sl === "IN_STOCK" && ps !== "wallet_found" && ps !== "only_regular_found") {
+  if (
+    sl === "IN_STOCK" &&
+    ps !== "wallet_found" &&
+    ps !== "only_regular_found" &&
+    ps !== "loaded_showcase_only"
+  ) {
     return true;
   }
   return false;
@@ -139,7 +144,7 @@ function deriveEvaluationStatus(input: {
     return "below_min";
   }
   if (
-    input.parseStatus === "only_regular_found" &&
+    (input.parseStatus === "only_regular_found" || input.parseStatus === "loaded_showcase_only") &&
     input.buyerRegular != null &&
     input.buyerRegular > 0 &&
     input.buyerRegular < t - tol
@@ -358,7 +363,8 @@ export async function runPriceMonitorJob(opts: {
         parseStatus === "wallet_found" ||
         (tier === "public_dom" &&
           parseStatus !== "parse_failed" &&
-          parseStatus !== "only_regular_found");
+          parseStatus !== "only_regular_found" &&
+          parseStatus !== "loaded_showcase_only");
 
       const lastGoodMode = lastGoodSubstitutionMode(p.walletRubLastGoodAt ?? null);
 
@@ -401,6 +407,7 @@ export async function runPriceMonitorJob(opts: {
 
       const partialDom =
         parseStatus === "only_regular_found" ||
+        parseStatus === "loaded_showcase_only" ||
         (!parseRecovered && dom.success && !usedLastGoodFallback);
 
       let walletNumericConfidence = walletParseNumericConfidence({
@@ -483,7 +490,9 @@ export async function runPriceMonitorJob(opts: {
 
       const sessionDomTick =
         dom.success &&
-        (parseStatus === "wallet_found" || parseStatus === "only_regular_found");
+        (parseStatus === "wallet_found" ||
+          parseStatus === "only_regular_found" ||
+          parseStatus === "loaded_showcase_only");
       const oosRecoverTick = stockLevel === "OUT_OF_STOCK" && hasUsablePrice && !hardAuth;
       if (sessionDomTick || oosRecoverTick) {
         domSuccessForSession = true;
@@ -511,7 +520,10 @@ export async function runPriceMonitorJob(opts: {
           ? "buyer_unverified"
           : evaluationBase;
 
-      if (parseRecovered && parseStatus === "only_regular_found") {
+      if (
+        parseRecovered &&
+        (parseStatus === "only_regular_found" || parseStatus === "loaded_showcase_only")
+      ) {
         evaluationStatus = "partial";
       }
       if (usedLastGoodFallback) {

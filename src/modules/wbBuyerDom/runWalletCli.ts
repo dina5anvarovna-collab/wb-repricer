@@ -91,6 +91,8 @@ function isWalletParseStatus(s: string): s is WalletParseStatus {
   return (
     s === "wallet_found" ||
     s === "only_regular_found" ||
+    s === "loaded_showcase_only" ||
+    s === "loaded_no_price" ||
     s === "parse_failed" ||
     s === "auth_required" ||
     s === "blocked_or_captcha"
@@ -301,7 +303,8 @@ export function walletParserResultToBuyerDom(r: WalletParserResult): BuyerDomRes
   const hardFail =
     r.parseStatus === "parse_failed" ||
     r.parseStatus === "auth_required" ||
-    r.parseStatus === "blocked_or_captcha";
+    r.parseStatus === "blocked_or_captcha" ||
+    r.parseStatus === "loaded_no_price";
   return {
     nmId: r.nmId,
     url: r.url,

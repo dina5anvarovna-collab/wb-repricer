@@ -387,7 +387,8 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       const okParse =
         result.parseStatus !== "parse_failed" &&
         result.parseStatus !== "auth_required" &&
-        result.parseStatus !== "blocked_or_captcha";
+        result.parseStatus !== "blocked_or_captcha" &&
+        result.parseStatus !== "loaded_no_price";
       if (result.priceParseSource === "popup_dom") {
         logger.info({ nmId, tag: "parse-probe-public" }, "popup parse success");
       } else if (result.priceParseSource === "public_dom") {
@@ -415,9 +416,12 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         priceParseSource: result.priceParseSource ?? null,
         nmId: result.nmId,
         showcaseRubEffective: result.showcaseRubEffective ?? null,
+        priceRegular: result.priceRegular ?? null,
+        priceWallet: result.priceWallet ?? null,
         walletHint: result.priceWallet,
         browserUrlAfterParse: result.browserUrlAfterParse ?? null,
         pageTitle: result.pageTitle ?? null,
+        mainResponseHttpStatus: result.mainResponseHttpStatus ?? null,
         confidence: result.sourceConfidence,
         debugArtifactPaths: result.debugArtifactPaths ?? [],
         attemptCount,
@@ -464,7 +468,8 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       const okParse =
         result.parseStatus !== "parse_failed" &&
         result.parseStatus !== "auth_required" &&
-        result.parseStatus !== "blocked_or_captcha";
+        result.parseStatus !== "blocked_or_captcha" &&
+        result.parseStatus !== "loaded_no_price";
       recordBrowserParseProbe({
         at: new Date().toISOString(),
         nmId,
@@ -486,9 +491,12 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         priceParseSource: result.priceParseSource ?? null,
         nmId: result.nmId,
         showcaseRubEffective: result.showcaseRubEffective ?? null,
+        priceRegular: result.priceRegular ?? null,
+        priceWallet: result.priceWallet ?? null,
         walletHint: result.priceWallet,
         browserUrlAfterParse: result.browserUrlAfterParse ?? null,
         pageTitle: result.pageTitle ?? null,
+        mainResponseHttpStatus: result.mainResponseHttpStatus ?? null,
         confidence: result.sourceConfidence,
         debugArtifactPaths: result.debugArtifactPaths ?? [],
         raw: result,
