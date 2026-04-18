@@ -407,7 +407,6 @@ export async function runPriceMonitorJob(opts: {
 
       const partialDom =
         parseStatus === "only_regular_found" ||
-        parseStatus === "loaded_showcase_only" ||
         (!parseRecovered && dom.success && !usedLastGoodFallback);
 
       let walletNumericConfidence = walletParseNumericConfidence({

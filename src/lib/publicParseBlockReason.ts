@@ -24,22 +24,28 @@ export type DetectBlockInput = {
 };
 
 /**
- * Карточка товара WB в DOM — приоритетнее «сырого» HTTP (например 498 у CDN).
- * Не заменяет проверку капчи/anti-bot: их нужно выполнять раньше.
+ * Карточка товара WB в DOM перекрывает «плохой» HTTP (в т.ч. 498 от CDN):
+ * если видим цены, CTA, артикул — продолжаем парсинг.
  */
-export function looksLikeWildberriesProductDetailPage(bodyText: string, pageUrl: string): boolean {
-  const t = bodyText.slice(0, 28_000);
-  const u = pageUrl.toLowerCase();
-  if (!/\/catalog\/\d+\//i.test(u)) return false;
-  if (!/(₽|руб)/i.test(t)) return false;
-  if (t.length < 80) return false;
-  return (
-    /(в корзину|добавить в корзину|купить сейчас)/i.test(t) ||
+export function looksLikeLoadedWbProductCard(input: {
+  bodyText: string;
+  pageUrl: string;
+  expectedNmId?: number | null;
+}): boolean {
+  const t = input.bodyText.slice(0, 14_000);
+  const u = input.pageUrl.toLowerCase();
+  if (t.length < 200) return false;
+  const hasCurrency = /(₽|руб)/i.test(t);
+  const hasCommerceSignal =
+    /(в\s*корзину|добавить\s+в\s+корзину|купить\s+сейчас|оформить\s+заказ)/i.test(t) ||
     /артикул/i.test(t) ||
-    /характеристик/i.test(t) ||
-    /рейтинг|отзыв/i.test(t) ||
-    /wildberries/i.test(t)
-  );
+    /характеристик/i.test(t);
+  const wbContext =
+    /wildberries|wildberr/i.test(t) || /\/catalog\/\d+\//i.test(u) || /wb\.ru/i.test(u);
+  const nmInUrl =
+    input.expectedNmId != null &&
+    new RegExp(`/catalog/${input.expectedNmId}/`, "i").test(u);
+  return hasCurrency && hasCommerceSignal && (wbContext || nmInUrl);
 }
 
 export function detectPublicParseBlockSignals(input: DetectBlockInput): {
@@ -81,17 +87,26 @@ export function detectPublicParseBlockSignals(input: DetectBlockInput): {
     return { reason: "unexpected_redirect", legacyParseStatus: "blocked_or_captcha" };
   }
 
-  /** DOM-карточка товара: не считаем ответ ошибкой только из-за статуса (498 и т.д.). */
-  if (looksLikeWildberriesProductDetailPage(input.bodyText, input.pageUrl)) {
+  /** DOM > HTTP: полноценная карточка не считается блоком из‑за статуса ответа. */
+  if (
+    looksLikeLoadedWbProductCard({
+      bodyText: input.bodyText,
+      pageUrl: input.pageUrl,
+      expectedNmId: input.expectedNmId,
+    })
+  ) {
     return { reason: "ok", legacyParseStatus: null };
+  }
+
+  if (typeof status === "number" && (status >= 400 || status === 0)) {
+    /** 498 часто приходит при нормальной гидратации карточки — не блокируем по одному числу. */
+    if (status !== 498) {
+      return { reason: "http_error", legacyParseStatus: null };
+    }
   }
 
   if (t.length < 120 && !/wildberries|wb\.ru/i.test(t)) {
     return { reason: "page_blocked", legacyParseStatus: "blocked_or_captcha" };
-  }
-
-  if (typeof status === "number" && (status >= 400 || status === 0)) {
-    return { reason: "http_error", legacyParseStatus: null };
   }
 
   return { reason: "ok", legacyParseStatus: null };

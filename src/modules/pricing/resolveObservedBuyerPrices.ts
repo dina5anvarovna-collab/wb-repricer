@@ -152,6 +152,9 @@ export function resolveObservedBuyerPrices(input: {
   const cookieShowcase = toRub(dom.showcaseRubFromCookies);
   const popupWithoutWalletRub = toRub(dom.popupWithoutWalletRub);
   const popupWalletRub = toRub(dom.popupWalletRub);
+  const parseStatusRaw = typeof dom.parseStatus === "string" ? dom.parseStatus : "";
+  const skipDomShowcaseAsWalletChannel =
+    parseStatusRaw === "loaded_showcase_only" || parseStatusRaw === "loaded_no_price";
   const popupParsed =
     dom.popupOpened === true &&
     popupWithoutWalletRub != null &&
@@ -162,8 +165,10 @@ export function resolveObservedBuyerPrices(input: {
   const domRegular = toRub(dom.priceRegular);
   const domWalletObserved = toRub(
     popupWalletRub ??
-      (dom as BuyerDomResult & { walletPriceRubAcceptedFromDom?: number | null }).walletPriceRubAcceptedFromDom ??
-      dom.showcaseRubFromDom ??
+      (skipDomShowcaseAsWalletChannel
+        ? null
+        : (dom as BuyerDomResult & { walletPriceRubAcceptedFromDom?: number | null }).walletPriceRubAcceptedFromDom) ??
+      (skipDomShowcaseAsWalletChannel ? null : dom.showcaseRubFromDom) ??
       dom.priceWallet,
   );
   const oldPriceRub = toRub((dom as any).oldPriceRub ?? null);
@@ -197,7 +202,9 @@ export function resolveObservedBuyerPrices(input: {
       : domWalletObserved != null
         ? "fallback"
         : "unverified";
-  const topPriceFound = buyerWallet != null;
+  const topPriceFound =
+    buyerWallet != null ||
+    (parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0);
 
   /**
    * Новая модель:
@@ -250,6 +257,13 @@ export function resolveObservedBuyerPrices(input: {
 
   /** Колонки снимка: wallet только из DOM wallet selector, СПП только формула. */
   let showcaseRub = buyerWallet;
+  if (
+    parseStatusRaw === "loaded_showcase_only" &&
+    showcaseEff != null &&
+    showcaseEff > 0
+  ) {
+    showcaseRub = showcaseEff;
+  }
   let priceWithoutWalletRub = buyerRegular;
   let walletDiscountRub =
     showcaseRub != null && priceWithoutWalletRub != null
@@ -265,7 +279,8 @@ export function resolveObservedBuyerPrices(input: {
 
   const hasUsablePrice =
     (buyerWallet != null && Number.isFinite(buyerWallet) && buyerWallet > 0) ||
-    (buyerRegular != null && Number.isFinite(buyerRegular) && buyerRegular > 0);
+    (buyerRegular != null && Number.isFinite(buyerRegular) && buyerRegular > 0) ||
+    (parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0);
 
   const blockedBySafetyRule: string[] = [];
   let invalid = false;
@@ -321,7 +336,10 @@ export function resolveObservedBuyerPrices(input: {
           : "spp_missing",
     );
   }
-  if (buyerWallet == null || buyerWallet <= 0) {
+  if (
+    (buyerWallet == null || buyerWallet <= 0) &&
+    !(parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0)
+  ) {
     blockedBySafetyRule.push("invalid_wallet_price");
     walletInvalid = true;
     invalid = true;

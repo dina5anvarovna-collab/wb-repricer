@@ -303,8 +303,7 @@ export function walletParserResultToBuyerDom(r: WalletParserResult): BuyerDomRes
   const hardFail =
     r.parseStatus === "parse_failed" ||
     r.parseStatus === "auth_required" ||
-    r.parseStatus === "blocked_or_captcha" ||
-    r.parseStatus === "loaded_no_price";
+    r.parseStatus === "blocked_or_captcha";
   return {
     nmId: r.nmId,
     url: r.url,

@@ -10,6 +10,8 @@ export const CONF_PUBLIC_DOM_WALLET = 0.7;
 /** @deprecated prefer CONF_PUBLIC_DOM_WALLET */
 export const CONF_PUBLIC_WALLET_MARKER = CONF_PUBLIC_DOM_WALLET;
 export const CONF_PARTIAL_DOM = 0.5;
+/** Две витринные ступени без подтверждённого кошелька (DOM макс/мин). */
+export const CONF_LOADED_SHOWCASE_ONLY = 0.68;
 export const CONF_FAILED = 0.0;
 
 export type MonitorParseContour = "browser_primary" | "browser_retry" | "public_fallback";
@@ -49,19 +51,20 @@ export function walletParseNumericConfidence(input: {
   if (
     input.parseStatus === "parse_failed" ||
     input.parseStatus === "auth_required" ||
-    input.parseStatus === "blocked_or_captcha" ||
-    input.parseStatus === "loaded_no_price"
+    input.parseStatus === "blocked_or_captcha"
   ) {
     return CONF_FAILED;
   }
   if (input.popupParsed || input.priceParseSource === "popup_dom") {
     return CONF_POPUP_DOM;
   }
-  if (
-    input.partialDom ||
-    input.parseStatus === "only_regular_found" ||
-    input.parseStatus === "loaded_showcase_only"
-  ) {
+  if (input.partialDom || input.parseStatus === "only_regular_found") {
+    return CONF_PARTIAL_DOM;
+  }
+  if (input.parseStatus === "loaded_showcase_only") {
+    return CONF_LOADED_SHOWCASE_ONLY;
+  }
+  if (input.parseStatus === "loaded_no_price") {
     return CONF_PARTIAL_DOM;
   }
 
