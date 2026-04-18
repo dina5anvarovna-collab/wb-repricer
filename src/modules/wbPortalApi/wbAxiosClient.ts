@@ -15,7 +15,7 @@ function attachCookieInterceptor(client: AxiosInstance): void {
 export function createWbShowcaseAxios(): AxiosInstance {
   const c = axios.create({
     timeout: 35_000,
-    validateStatus: () => true,
+    validateStatus: (_status: number) => true,
     headers: {
       Accept: "application/json, text/plain, */*",
       "User-Agent":
@@ -35,7 +35,7 @@ export function createWbSellerApiAxios(token: string): AxiosInstance {
       Authorization: norm,
       Accept: "application/json",
     },
-    validateStatus: () => true,
+    validateStatus: (_status: number) => true,
   });
 }
 

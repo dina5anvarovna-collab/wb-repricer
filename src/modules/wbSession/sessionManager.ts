@@ -54,7 +54,7 @@ export async function isBrowserCookieSessionAlive(cookieHeader: string | null): 
       },
       timeout: 20_000,
       maxRedirects: 5,
-      validateStatus: (s) => s >= 200 && s < 400,
+      validateStatus: (status: number) => status >= 200 && status < 400,
     });
     const body = typeof res.data === "string" ? res.data : "";
     const finalUrl = String(res.config?.url ?? "");

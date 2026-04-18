@@ -198,7 +198,7 @@ async function tryShowcaseCardWithCookieHeader(
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
       },
       timeout: 22_000,
-      validateStatus: () => true,
+      validateStatus: (_status: number) => true,
     });
     const status = res.status;
     if (status !== 200) {
