@@ -12,6 +12,7 @@ import {
   THRESHOLD_PROTECTIVE,
   allowsAutomaticPriceDecrease,
   allowsProtectiveAction,
+  hoursSince,
 } from "../../lib/repricingGuards.js";
 import {
   fetchGoodsPriceByNmId,
@@ -155,6 +156,27 @@ export async function runEnforcementJob(opts: {
       const minAllowed = mr.minAllowedFinalPrice;
       if (!mr.controlEnabled) {
         skipped += 1;
+        continue;
+      }
+
+      if (p.safeModeHold) {
+        await writeAuditLog({
+          action: "protection.skip",
+          entityType: "WbProduct",
+          entityId: p.id,
+          dryRun: opts.dryRun,
+          meta: {
+            nmId: p.nmId,
+            finalAction: "skipped_safe_hold",
+            reason: "safe_mode_hold_active",
+            minimumAllowed: minAllowed,
+            safeModeHold: true,
+            lastGoodAgeHours: hoursSince(p.walletRubLastGoodAt ?? null),
+          },
+        });
+        skipped += 1;
+        processed += 1;
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
         continue;
       }
 
@@ -430,6 +452,7 @@ export async function runEnforcementJob(opts: {
         source: "db_price_snapshots",
         confidence: numericConf,
         safeModeHold: p.safeModeHold,
+        lastGoodAgeHours: hoursSince(p.walletRubLastGoodAt ?? null),
         parseSourceHint: parseSnapshotDetailJson(primarySnap.detailJson).priceParseSource ?? null,
         thresholdDecrease: THRESHOLD_DECREASE,
         thresholdProtective: THRESHOLD_PROTECTIVE,
@@ -571,11 +594,12 @@ export async function runEnforcementJob(opts: {
       }
 
       const djPrimary = parseSnapshotDetailJson(primarySnap.detailJson);
+      const monitorContour = String(djPrimary.monitorParseContour ?? "");
       const appliedReason =
         numericConf >= THRESHOLD_DECREASE
-          ? djPrimary.priceParseSource === "popup_dom"
-            ? "applied_popup_dom_confident"
-            : "applied_public_dom_confident"
+          ? monitorContour === "public_fallback"
+            ? "applied_public_fallback"
+            : "applied_browser_wallet"
           : p.walletRubLastGood != null && p.safeModeHold
             ? "applied_protective_raise_last_good"
             : "applied_protective_raise_snapshot";

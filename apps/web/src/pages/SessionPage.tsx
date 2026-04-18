@@ -182,6 +182,43 @@ export function SessionPage() {
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["public-parse-status"] }),
   });
 
+  const browserProbeM = useMutation({
+    mutationFn: async (nmId: number) =>
+      apiFetch<{
+        ok: boolean;
+        parseStatus?: string;
+        blockReason?: string | null;
+        nmId?: number;
+        browserUrlAfterParse?: string | null;
+        confidence?: number;
+        debugArtifactPaths?: string[];
+      }>("/api/settings/parse-probe-browser", {
+        method: "POST",
+        json: { nmId },
+      }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["browser-parse-status"] }),
+  });
+
+  const bparse = useQuery({
+    queryKey: ["browser-parse-status"],
+    queryFn: () =>
+      apiFetch<{
+        lastBrowserProbe: {
+          at: string;
+          nmId: number | null;
+          ok: boolean;
+          parseStatus: string | null;
+          blockReason: string | null;
+          browserUrlAfterParse: string | null;
+          confidence: number | null;
+          monitorParseContour: string | null;
+          debugArtifactPaths: string[];
+        } | null;
+      }>("/api/browser-parse/status"),
+    enabled:
+      q.status === "success" && !(q.data?.publicParsing?.buyerAuthDisabled ?? true),
+  });
+
   if (q.isLoading) {
     return <p className="text-[#8b93a7]">Загрузка статуса…</p>;
   }
@@ -552,6 +589,83 @@ export function SessionPage() {
 
       {!buyerOff ? (
         <>
+          <div className="flex flex-wrap items-end gap-3 rounded-xl border border-blue-900/35 bg-[#0c1419] p-4">
+            <div>
+              <label className="block text-xs text-[#8b93a7]">
+                Проба browser wallet (persistent профиль, nmId)
+              </label>
+              <input
+                className="mt-1 w-40 rounded border border-[#252a33] bg-[#13161c] px-2 py-1 text-sm text-white"
+                value={probeNmId}
+                onChange={(e) => setProbeNmId(e.target.value)}
+                placeholder="напр. 130744302"
+              />
+            </div>
+            <button
+              type="button"
+              disabled={browserProbeM.isPending}
+              onClick={() => {
+                const n = Number.parseInt(probeNmId.trim(), 10);
+                if (!Number.isFinite(n)) return;
+                browserProbeM.mutate(n);
+              }}
+              className="rounded-lg bg-blue-700/90 px-3 py-2 text-sm text-white hover:bg-blue-600 disabled:opacity-40"
+            >
+              Запустить browser probe
+            </button>
+          </div>
+          {browserProbeM.data ? (
+            <div className="space-y-2 rounded-lg bg-black/40 p-3 text-xs text-[#c4c9d4]">
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                <span>
+                  ok:{" "}
+                  <strong className={browserProbeM.data.ok ? "text-emerald-400" : "text-red-400"}>
+                    {browserProbeM.data.ok ? "yes" : "no"}
+                  </strong>
+                </span>
+                <span>
+                  parseStatus:{" "}
+                  <strong className="text-white">{browserProbeM.data.parseStatus ?? "—"}</strong>
+                </span>
+                <span>
+                  blockReason:{" "}
+                  <strong className="text-amber-200">{browserProbeM.data.blockReason ?? "—"}</strong>
+                </span>
+              </div>
+              <p className="break-all text-[11px] text-[#8cb4ff]">{browserProbeM.data.browserUrlAfterParse ?? ""}</p>
+            </div>
+          ) : null}
+          {bparse.data?.lastBrowserProbe ? (
+            <div className="rounded-lg border border-[#252a33] bg-[#0c0e12] p-3 text-xs text-[#c4c9d4]">
+              <p className="font-medium text-[#e8eaef]">Последняя browser probe (процесс)</p>
+              <ul className="mt-2 space-y-1 font-mono text-[11px] leading-relaxed">
+                <li>
+                  Время:{" "}
+                  <span className="text-[#c4c9d4]">
+                    {new Date(bparse.data.lastBrowserProbe.at).toLocaleString("ru-RU")}
+                  </span>
+                </li>
+                <li>
+                  ok:{" "}
+                  <span className={bparse.data.lastBrowserProbe.ok ? "text-emerald-400" : "text-red-300"}>
+                    {bparse.data.lastBrowserProbe.ok ? "yes" : "no"}
+                  </span>
+                </li>
+                <li className="break-all">
+                  URL: {bparse.data.lastBrowserProbe.browserUrlAfterParse ?? "—"}
+                </li>
+              </ul>
+            </div>
+          ) : null}
+          <p className="text-xs leading-relaxed text-[#8b93a7]">
+            Сервер без GUI: войдите через{" "}
+            <code className="rounded bg-[#252a33] px-1 text-[#d6dce8]">
+              xvfb-run -s &quot;-screen 0 1366x900x24&quot; npm run wallet:login
+            </code>
+            , либо noVNC / X11 forwarding к тому же хосту где лежит{" "}
+            <code className="rounded bg-[#252a33] px-1">WB_BROWSER_PROFILE_DIR</code>.
+          </p>
+
           <div className="space-y-2 rounded-xl border border-[#252a33] bg-[#0c0e12] p-4">
             <p className="text-sm text-[#c4c9d4]">Импорт storageState (JSON)</p>
             <input

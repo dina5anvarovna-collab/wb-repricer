@@ -81,14 +81,37 @@ sudo systemctl restart wb-repricer
 ```
 
 4. Проверка: `GET http://SERVER_IP:3001/health`, UI на порту приложения.
-5. Buyer-login на сервере **не обязателен**: мониторинг сначала парсит публичную витрину и popup; для fallback импортируйте `storageState` или ZIP профиля (`POST /api/settings/buyer-session/import-storage-state`, `POST /api/settings/buyer-session/import-profile-archive`). Headed-окно без X11 по умолчанию отключено (`REPRICER_HEADED_LOGIN_ALLOWED`).
+5. Buyer-login на сервере **не обязателен**, если достаточно только **public-first** парсинга (`REPRICER_DISABLE_BUYER_AUTH=true` по умолчанию). Чтобы использовать **persistent-профиль покупателя** на VPS и стабильный парсинг кошелька через сохранённые cookies:
+
+### Вход покупателя WB на сервере (Linux, один раз)
+
+Нужна **графическая среда** для окна браузера: например `ssh -X user@host` с XQuartz/X11 на клиенте, или виртуальный дисплей (`xvfb-run`).
+
+1. Подключитесь по SSH к серверу, перейдите в каталог проекта:  
+   `cd /opt/WB_Repricer` (или ваш путь).
+2. В `.env` задайте:
+   - `REPRICER_DISABLE_BUYER_AUTH=false` — включить контур покупателя;
+   - `WB_BROWSER_PROFILE_DIR=/opt/WB_Repricer/.wb-browser-profile` — **один** постоянный каталог профиля Chromium (Playwright `launchPersistentContext`);
+   - опционально `WB_BROWSER_HEADLESS=true` — мониторинг и CLI-парсинг без окна после логина.
+3. Установите Chromium для Playwright: `npx playwright install chromium`.
+4. Сборка: `npm run build`.
+5. Запуск интерактивного входа:
+   ```bash
+   npm run wallet:login
+   ```
+   Откроется браузер — войдите в аккаунт WB на главной странице. После успешного входа закройте процесс (Ctrl+C в терминале после закрытия вкладки при необходимости). Профиль и cookies остаются в `WB_BROWSER_PROFILE_DIR`.
+6. Запустите приложение как обычно (`node dist/server.js` или systemd). Мониторинг использует **тот же** профиль в **headless**, без повторного логина.
+
+Если сессия истечёт, в логах будет `buyer_session_stale` и мониторинг временно перейдёт на **эфемерный public-style** парсинг (без автологина); safe mode и last-good не отключаются.
+
+Ручная альтернатива без CLI-окна: импорт `storageState` или ZIP профиля — `POST /api/settings/buyer-session/import-storage-state`, `POST /api/settings/buyer-session/import-profile-archive`.
 
 ### Сессии и данные WB (production-like, личное использование)
 
 | Уровень | Что используется | Где хранится |
 |--------|-------------------|--------------|
 | **1** | Seller API **токен** (официально) — каталог, цены, остаток в `WbProduct` | `SellerCabinet.tokenEncrypted` |
-| **2** | Браузер **Playwright**: persistent profile (`REPRICER_BUYER_PROFILE_DIR`) + опционально **storageState** JSON | профиль на диске; cookies в `REPRICER_WB_STORAGE_STATE_PATH` |
+| **2** | Браузер **Playwright**: persistent profile (`WB_BROWSER_PROFILE_DIR` или `REPRICER_BUYER_PROFILE_DIR`) + опционально **storageState** JSON | профиль на диске; cookies в `REPRICER_WB_STORAGE_STATE_PATH` |
 | **3** | UI «Сессия WB»: проверка, **Обновить cookies** (фон/окно), CLI-вход | таблица `AuthSession` (метаданные проверок) |
 
 - **session-manager:** `src/modules/wbSession/sessionManager.ts` — `loadSavedSession`, `saveSession`, `getValidCookies`, `refreshSessionIfNeeded`, `isBrowserCookieSessionAlive`, `exportCookieHeader`, `normalizeCookies`, синхронизация метаданных в `AuthSession`.
@@ -117,7 +140,9 @@ sudo systemctl restart wb-repricer
 
 - `REPRICER_WALLET_CLI_PATH` — по умолчанию `./dist/walletDom/cli.js`
 - `REPRICER_WALLET_PROJECT_ROOT` — `.` (корень `WB_Repricer`, cwd для `node` при запуске CLI)
-- `REPRICER_BUYER_PROFILE_DIR` — `.wb-browser-profile` (относительно `REPRICER_WALLET_PROJECT_ROOT`)
+- `WB_BROWSER_PROFILE_DIR` — приоритетный путь к persistent-профилю покупателя (например `/opt/WB_Repricer/.wb-browser-profile`); иначе `REPRICER_BUYER_PROFILE_DIR` / `.wb-browser-profile`
+- `WB_BROWSER_HEADLESS` — если задан, переопределяет headless для мониторинга и CLI-парсера кошелька (иначе используется `HEADLESS`)
+- `REPRICER_BUYER_PROFILE_DIR` — `.wb-browser-profile` (относительно корня проекта), если `WB_BROWSER_PROFILE_DIR` не задан
 - `REPRICER_CRON_SYNC` — cron мониторинга, по умолчанию каждые 2 часа
 - `REPRICER_WALLET_DEST` — `dest` региона для карточки WB (список: `GET /api/regions` или `data/wb-regions.json`)
 - `REPRICER_ENFORCE_TOLERANCE_RUB`, `REPRICER_ENFORCE_MAX_STEP_PERCENT` — допуск к цели и лимит шага цены в кабинете за один проход

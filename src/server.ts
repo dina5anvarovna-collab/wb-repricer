@@ -19,6 +19,7 @@ import {
 } from "./modules/health/healthChecks.js";
 import {
   buildProductionHealthSummary,
+  healthBrowserParse,
   healthEnforcement,
   healthPublicParse,
 } from "./modules/health/productionHealth.js";
@@ -69,6 +70,7 @@ async function main(): Promise<void> {
   app.get("/health/buyer-session", async () => healthBuyerSession());
   app.get("/health/storage", async () => healthStorageDirs());
   app.get("/health/public-parse", async () => healthPublicParse());
+  app.get("/health/browser-parse", async () => healthBrowserParse());
   app.get("/health/enforcement", async () => healthEnforcement());
   app.get("/health/summary", async () => buildProductionHealthSummary());
 

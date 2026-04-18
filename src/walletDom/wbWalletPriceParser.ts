@@ -49,11 +49,16 @@ const LINUX_CHROME_CANDIDATES = [
   "/usr/bin/chromium-browser",
 ] as const;
 
+/** Сначала главная — удобно для одноразового входа на сервере (`npm run wallet:login`). */
 const LOGIN_URL_SEQUENCE = [
+  "https://www.wildberries.ru/",
   "https://www.wildberries.ru/security/login",
   "https://www.wildberries.ru/lk",
-  "https://www.wildberries.ru/",
 ] as const;
+
+/** Buyer / persistent-wallet контур (не REPRICER_PUBLIC_*): единые размер окна и TZ для WB. */
+const WB_BUYER_VIEWPORT = { width: 1366, height: 900 } as const;
+const WB_BUYER_TZ = "Europe/Moscow";
 
 /** Chrome/Chromium create these in the profile root; stale files after crash/Ctrl+C block the next launch. */
 const PROFILE_SINGLETON_ARTIFACTS = [
@@ -2337,8 +2342,9 @@ export async function runWbBuyerProfileLogin(
   const launchOpts: Parameters<typeof chromium.launchPersistentContext>[1] = {
     headless: false,
     locale: "ru-RU",
+    timezoneId: WB_BUYER_TZ,
     proxy: input.proxy ? { server: input.proxy } : undefined,
-    viewport: { width: 1440, height: 1900 },
+    viewport: WB_BUYER_VIEWPORT,
     ...(resolved.executablePath
       ? { executablePath: resolved.executablePath }
       : {}),
@@ -2346,6 +2352,8 @@ export async function runWbBuyerProfileLogin(
     args: [
       "--disable-blink-features=AutomationControlled",
       "--disable-session-crashed-bubble",
+      "--disable-dev-shm-usage",
+      "--no-sandbox",
     ],
   };
 
@@ -2545,13 +2553,16 @@ async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<Walle
     launchOpts = {
       headless: input.headless ?? true,
       locale: "ru-RU",
+      timezoneId: WB_BUYER_TZ,
       proxy: input.proxy ? { server: input.proxy } : undefined,
-      viewport: { width: 1440, height: 1900 },
+      viewport: WB_BUYER_VIEWPORT,
       ...(resolved.executablePath ? { executablePath: resolved.executablePath } : {}),
       ignoreDefaultArgs: ["--enable-automation"],
       args: [
         "--disable-blink-features=AutomationControlled",
         "--disable-session-crashed-bubble",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
       ],
     };
   }
@@ -2717,13 +2728,16 @@ async function getWbWalletPriceBatchUnlocked(
     launchOpts = {
       headless: base.headless ?? true,
       locale: "ru-RU",
+      timezoneId: WB_BUYER_TZ,
       proxy: base.proxy ? { server: base.proxy } : undefined,
-      viewport: { width: 1440, height: 1900 },
+      viewport: WB_BUYER_VIEWPORT,
       ...(resolved.executablePath ? { executablePath: resolved.executablePath } : {}),
       ignoreDefaultArgs: ["--enable-automation"],
       args: [
         "--disable-blink-features=AutomationControlled",
         "--disable-session-crashed-bubble",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
       ],
     };
   }

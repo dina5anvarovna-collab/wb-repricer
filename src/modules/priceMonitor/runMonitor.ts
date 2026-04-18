@@ -9,10 +9,16 @@ import {
   walletParserResultToBuyerDom,
   type BuyerDomResult,
 } from "../wbBuyerDom/runWalletCli.js";
-import { getWbWalletPriceBatch } from "../../walletDom/wbWalletPriceParser.js";
+import {
+  getWbWalletPrice,
+  getWbWalletPriceBatch,
+  type WalletParserResult,
+} from "../../walletDom/wbWalletPriceParser.js";
 import { resolveBuyerProfileDir } from "../catalogSync/syncCatalog.js";
 import { resolveStockLevel, type StockLevel } from "../../lib/stockLevel.js";
 import { prepareBuyerSessionForMonitor } from "../buyerSession/buyerSessionManager.js";
+import { checkBuyerSession } from "../../lib/buyerSessionCheck.js";
+import { resolveWbBrowserHeadless } from "../../lib/wbBrowserEnv.js";
 import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../../lib/repricerMode.js";
 import {
   createEphemeralWalletProfileDir,
@@ -28,9 +34,54 @@ import {
 import {
   lastGoodSubstitutionMode,
   walletParseNumericConfidence,
+  type MonitorParseContour,
 } from "../../lib/repricingGuards.js";
+import {
+  randomPublicJitterWaitMs,
+  resolvePublicBrowserHeadless,
+} from "../../lib/publicBrowserRuntime.js";
 
 const EVAL_TOL_RUB = 3;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function makeSyntheticWalletFailure(
+  nmId: number,
+  region: string | null,
+  err: unknown,
+): WalletParserResult {
+  const message = err instanceof Error ? err.message : String(err);
+  return {
+    nmId,
+    url: `https://www.wildberries.ru/catalog/${nmId}/detail.aspx`,
+    region,
+    priceRegular: null,
+    discountedPrice: null,
+    priceWallet: null,
+    walletLabel: null,
+    walletDiscountText: null,
+    inStock: null,
+    parsedAt: new Date().toISOString(),
+    source: "dom",
+    parseStatus: "parse_failed",
+    sourceConfidence: 0,
+    parseMethod: "batch_fatal",
+    lines: [message.slice(0, 600)],
+  };
+}
+
+function walletStepNeedsRecovery(sl: StockLevel, dom: BuyerDomResult): boolean {
+  const ps = dom.parseStatus ?? "";
+  if (ps === "parse_failed" || ps === "blocked_or_captcha" || ps === "auth_required") {
+    return true;
+  }
+  if (sl === "IN_STOCK" && ps !== "wallet_found" && ps !== "only_regular_found") {
+    return true;
+  }
+  return false;
+}
 
 /** Query-параметр `dest` на странице карточки (может отсутствовать после SPA). */
 function destParamFromUrl(href: string | null | undefined): string | null {
@@ -117,6 +168,8 @@ export async function runPriceMonitorJob(opts: {
   });
 
   let ephemeralProfileDir: string | null = null;
+  /** Persistent профиль недоступен → как public-only для этого прогона. */
+  let ephemeralBuyerFallback = false;
 
   try {
     let session: Awaited<ReturnType<typeof prisma.buyerSession.findFirst>> = null;
@@ -134,6 +187,28 @@ export async function runPriceMonitorJob(opts: {
         orderBy: { updatedAt: "desc" },
       });
       profileDir = session?.profileDir ?? resolveBuyerProfileDir();
+      logger.info({ tag: "buyer_session_loaded", profileDir }, "persistent buyer profile directory");
+
+      const chk = await checkBuyerSession(profileDir);
+      if (chk.status === "valid") {
+        logger.info(
+          { tag: "buyer_session_valid", profileDir, detail: chk.detail },
+          "buyer session validated — browser parsing with saved profile",
+        );
+      } else {
+        ephemeralBuyerFallback = true;
+        logger.warn(
+          {
+            tag: "buyer_session_stale",
+            profileDir,
+            checkStatus: chk.status,
+            detail: chk.detail,
+          },
+          "buyer session not usable — fallback to ephemeral public-style parse (no auto-login)",
+        );
+        ephemeralProfileDir = createEphemeralWalletProfileDir();
+        profileDir = ephemeralProfileDir;
+      }
     }
     const regionDests = await getSelectedRegionDests();
     const envWalletDest = env.REPRICER_WALLET_DEST.trim() || null;
@@ -157,7 +232,7 @@ export async function runPriceMonitorJob(opts: {
       },
     });
 
-    if (!isBuyerAuthDisabled()) {
+    if (!isBuyerAuthDisabled() && !ephemeralBuyerFallback) {
       await prepareBuyerSessionForMonitor();
     }
 
@@ -168,11 +243,14 @@ export async function runPriceMonitorJob(opts: {
       authWall: 0,
       captcha: 0,
       safeModeLastGood: 0,
+      browserRetry: 0,
+      publicFallback: 0,
     };
 
     const stepsTotal = products.length * destList.length;
     const useWalletBatch = monitorUsesWalletBatch() && stepsTotal > 0;
-    const sppViaCookies = monitorSppViaCookies() && !isBuyerAuthDisabled();
+    const sppViaCookies =
+      monitorSppViaCookies() && !isBuyerAuthDisabled() && !ephemeralBuyerFallback;
     logger.info(
       {
         products: products.length,
@@ -199,12 +277,21 @@ export async function runPriceMonitorJob(opts: {
     type ProductRow = (typeof products)[number];
     const regionalSnapshotsByProduct = new Map<string, BuyerRegionalSnapshot[]>();
 
+    const defaultMonitorContour: MonitorParseContour =
+      isBuyerAuthDisabled() || ephemeralBuyerFallback ? "public_fallback" : "browser_primary";
+    const persistentBuyerProfileAbsolute =
+      !isBuyerAuthDisabled() && !ephemeralBuyerFallback
+        ? (session?.profileDir ?? resolveBuyerProfileDir())
+        : null;
+
     async function persistMonitorStep(
       p: ProductRow,
       walletDest: string | null,
       dom: BuyerDomResult,
       pauseAfter: boolean,
+      monitorParseContour?: MonitorParseContour,
     ): Promise<void> {
+      const contourEff = monitorParseContour ?? defaultMonitorContour;
       const destKey = walletDest?.trim() || null;
       const fixed = p.fixedPrices[0]?.targetPrice ?? null;
       const ruleMin = p.minPriceRule?.minAllowedFinalPrice ?? null;
@@ -322,6 +409,7 @@ export async function runPriceMonitorJob(opts: {
         walletMarkerDetected,
         popupParsed,
         partialDom,
+        monitorParseContour: contourEff,
       });
       if (protectOnlyLastGood && usedLastGoodFallback) {
         walletNumericConfidence = Math.min(walletNumericConfidence, 0.45);
@@ -436,6 +524,7 @@ export async function runPriceMonitorJob(opts: {
       const detailJson = JSON.stringify({
         parseStatus,
         parseMethod,
+        monitorParseContour: contourEff,
         stockLevel,
         evaluationStatus,
         diffSellerVsTarget: diffSeller,
@@ -624,28 +713,144 @@ export async function runPriceMonitorJob(opts: {
     }
 
     if (useWalletBatch) {
-      const raw = await getWbWalletPriceBatch(
+      const headlessEff = resolveWbBrowserHeadless();
+      logger.info(
         {
-          userDataDir: profileDir,
-          headless: true,
-          browser: resolveWalletDomBrowserKind(),
+          tag: "browser_parse_started",
+          profileDir,
+          steps: planned.length,
+          headless: headlessEff,
+          ephemeralFallback: ephemeralBuyerFallback,
+          persistentRetryDir: persistentBuyerProfileAbsolute ?? null,
         },
-        planned.map((x) => ({
-          nmId: x.p.nmId,
-          region: x.walletDest,
-          cabinetStock: x.p.stock,
-        })),
-        {
-          interStepDelayMs: env.REPRICER_MONITOR_BATCH_INTER_STEP_MS,
-          fetchShowcaseWithCookies: isBuyerAuthDisabled() ? false : sppViaCookies,
-          cardDetailFallbackDest: env.REPRICER_WALLET_DEST.trim() || null,
-          maxCardApiAttempts: env.REPRICER_MONITOR_CARD_API_MAX_ATTEMPTS,
-        },
+        "wallet batch DOM parse",
       );
+      let raw: WalletParserResult[];
+      try {
+        raw = await getWbWalletPriceBatch(
+          {
+            userDataDir: profileDir,
+            headless: headlessEff,
+            browser: resolveWalletDomBrowserKind(),
+          },
+          planned.map((x) => ({
+            nmId: x.p.nmId,
+            region: x.walletDest,
+            cabinetStock: x.p.stock,
+          })),
+          {
+            interStepDelayMs: env.REPRICER_MONITOR_BATCH_INTER_STEP_MS,
+            fetchShowcaseWithCookies:
+              isBuyerAuthDisabled() || ephemeralBuyerFallback ? false : sppViaCookies,
+            cardDetailFallbackDest: env.REPRICER_WALLET_DEST.trim() || null,
+            maxCardApiAttempts: env.REPRICER_MONITOR_CARD_API_MAX_ATTEMPTS,
+          },
+        );
+        logger.info(
+          { tag: "browser_parse_success", steps: planned.length, profileDir },
+          "wallet batch parse finished",
+        );
+      } catch (e) {
+        logger.error(
+          {
+            tag: "browser_parse_failed",
+            err: e instanceof Error ? e.message : String(e),
+          },
+          "wallet batch threw — synthetic parse_failed per step + per-SKU recovery",
+        );
+        raw = planned.map((pr) =>
+          makeSyntheticWalletFailure(pr.p.nmId, pr.walletDest, e),
+        );
+      }
+
       for (let i = 0; i < planned.length; i += 1) {
         const row = planned[i]!;
-        const dom = walletParserResultToBuyerDom(raw[i]!);
-        await persistMonitorStep(row.p, row.walletDest, dom, false);
+        let result = raw[i]!;
+        let dom = walletParserResultToBuyerDom(result);
+        let contour: MonitorParseContour = defaultMonitorContour;
+
+        let stockLevel = resolveStockLevel(row.p.stock, dom.inStock ?? null);
+        let needs = walletStepNeedsRecovery(stockLevel, dom);
+
+        if (needs && persistentBuyerProfileAbsolute) {
+          logger.info(
+            {
+              tag: "browser_parse_attempt",
+              nmId: row.p.nmId,
+              dest: row.walletDest,
+              attempt: 2,
+            },
+            "browser parse retry single card",
+          );
+          await sleep(env.REPRICER_MONITOR_BATCH_INTER_STEP_MS + randomPublicJitterWaitMs());
+          try {
+            const r2 = await getWbWalletPrice({
+              userDataDir: persistentBuyerProfileAbsolute,
+              nmId: row.p.nmId,
+              region: row.walletDest ?? undefined,
+              headless: headlessEff,
+              fetchShowcaseWithCookies:
+                isBuyerAuthDisabled() || ephemeralBuyerFallback ? false : sppViaCookies,
+              applyPublicBrowserEnv: false,
+              browser: resolveWalletDomBrowserKind(),
+            });
+            dom = walletParserResultToBuyerDom(r2);
+            result = r2;
+            contour = "browser_retry";
+            parseStats.browserRetry += 1;
+            stockLevel = resolveStockLevel(row.p.stock, dom.inStock ?? null);
+            needs = walletStepNeedsRecovery(stockLevel, dom);
+          } catch (re) {
+            logger.warn(
+              {
+                tag: "browser_parse_retry",
+                nmId: row.p.nmId,
+                err: re instanceof Error ? re.message : String(re),
+              },
+              "browser parse retry failed",
+            );
+          }
+        }
+
+        if (needs) {
+          const ephem = createEphemeralWalletProfileDir();
+          try {
+            logger.warn(
+              {
+                tag: "browser_parse_fallback_public",
+                nmId: row.p.nmId,
+                dest: row.walletDest,
+              },
+              "public parse fallback (ephemeral profile + public browser env)",
+            );
+            const pubHl = resolvePublicBrowserHeadless(undefined);
+            const r3 = await getWbWalletPrice({
+              userDataDir: ephem,
+              nmId: row.p.nmId,
+              region: row.walletDest ?? undefined,
+              headless: pubHl.headless ?? headlessEff,
+              fetchShowcaseWithCookies: false,
+              applyPublicBrowserEnv: true,
+              browser: resolveWalletDomBrowserKind(),
+            });
+            dom = walletParserResultToBuyerDom(r3);
+            contour = "public_fallback";
+            parseStats.publicFallback += 1;
+          } catch (fe) {
+            logger.warn(
+              {
+                tag: "browser_parse_failed",
+                nmId: row.p.nmId,
+                err: fe instanceof Error ? fe.message : String(fe),
+              },
+              "public fallback parse failed — persisting last browser result",
+            );
+          } finally {
+            removeEphemeralWalletProfileDir(ephem);
+          }
+        }
+
+        await persistMonitorStep(row.p, row.walletDest, dom, false, contour);
       }
     } else {
       for (const row of planned) {
@@ -655,7 +860,9 @@ export async function runPriceMonitorJob(opts: {
           regionDest: row.walletDest,
           timeoutMs: env.REPRICER_MONITOR_WALLET_TIMEOUT_MS,
           fetchShowcaseWithCookies:
-            isBuyerAuthDisabled() ? false : sppViaCookies || Boolean(row.walletDest?.trim()),
+            isBuyerAuthDisabled() || ephemeralBuyerFallback
+              ? false
+              : sppViaCookies || Boolean(row.walletDest?.trim()),
         });
         await persistMonitorStep(row.p, row.walletDest, dom, true);
       }
@@ -710,6 +917,10 @@ export async function runPriceMonitorJob(opts: {
       metaObj = {};
     }
     metaObj.parseStats = parseStats;
+    metaObj.recoveryStats = {
+      browserRetry: parseStats.browserRetry,
+      publicFallback: parseStats.publicFallback,
+    };
     metaObj.processedProducts = processed;
 
     await prisma.syncJob.update({

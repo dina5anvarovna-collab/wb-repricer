@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { env } from "../../config/env.js";
+import { resolveWbBrowserHeadless } from "../../lib/wbBrowserEnv.js";
 import { logger } from "../../lib/logger.js";
 import { runtimePaths } from "../../lib/runtimePaths.js";
 import type {
@@ -292,8 +293,7 @@ function domBrowserCliFlag(): string {
 }
 
 function headlessCliFlag(): string {
-  const v = env.HEADLESS.trim().toLowerCase();
-  const headless = !["0", "false", "no", "off"].includes(v);
+  const headless = resolveWbBrowserHeadless();
   return `--headless=${headless ? "true" : "false"}`;
 }
 

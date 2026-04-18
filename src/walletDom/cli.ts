@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { env } from "../config/env.js";
+import { resolveBuyerProfileDir } from "../modules/catalogSync/syncCatalog.js";
 import {
   getWbWalletPrice,
   runWbBuyerProfileLogin,
@@ -60,7 +61,7 @@ function parseArgs(argv: string[]): Args {
   const defaultBrowser: BrowserKind =
     env.BROWSER_EXECUTABLE_PATH.trim() || os.platform() === "darwin" ? "chrome" : "chromium";
   return {
-    userDataDir: result.userDataDir || path.resolve(process.cwd(), ".wb-browser-profile"),
+    userDataDir: result.userDataDir || resolveBuyerProfileDir(),
     url: result.url,
     nmId: result.nmId,
     proxy: result.proxy,

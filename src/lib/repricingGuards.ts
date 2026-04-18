@@ -3,9 +3,16 @@
  */
 
 export const CONF_POPUP_DOM = 1.0;
-export const CONF_PUBLIC_WALLET_MARKER = 0.8;
+/** Persistent buyer profile / browser batch DOM — не публичный fallback. */
+export const CONF_BROWSER_DOM_WALLET = 0.9;
+/** Публичный контур (эпемерный профиль + REPRICER_PUBLIC_*). */
+export const CONF_PUBLIC_DOM_WALLET = 0.7;
+/** @deprecated prefer CONF_PUBLIC_DOM_WALLET */
+export const CONF_PUBLIC_WALLET_MARKER = CONF_PUBLIC_DOM_WALLET;
 export const CONF_PARTIAL_DOM = 0.5;
 export const CONF_FAILED = 0.0;
+
+export type MonitorParseContour = "browser_primary" | "browser_retry" | "public_fallback";
 
 export const THRESHOLD_DECREASE = 0.8;
 export const THRESHOLD_PROTECTIVE = 0.5;
@@ -36,6 +43,8 @@ export function walletParseNumericConfidence(input: {
   walletMarkerDetected: boolean;
   popupParsed: boolean;
   partialDom: boolean;
+  /** Источник контура мониторинга (browser vs public fallback). */
+  monitorParseContour?: MonitorParseContour | null;
 }): number {
   if (
     input.parseStatus === "parse_failed" ||
@@ -50,8 +59,20 @@ export function walletParseNumericConfidence(input: {
   if (input.partialDom || input.parseStatus === "only_regular_found") {
     return CONF_PARTIAL_DOM;
   }
+
+  const browserTier =
+    input.monitorParseContour === "browser_primary" ||
+    input.monitorParseContour === "browser_retry";
+
+  if (browserTier) {
+    if (input.priceParseSource === "public_dom" && input.walletMarkerDetected) {
+      return CONF_BROWSER_DOM_WALLET;
+    }
+    return input.walletMarkerDetected ? CONF_BROWSER_DOM_WALLET : CONF_PARTIAL_DOM;
+  }
+
   if (input.priceParseSource === "public_dom" && input.walletMarkerDetected) {
-    return CONF_PUBLIC_WALLET_MARKER;
+    return CONF_PUBLIC_DOM_WALLET;
   }
   if (input.priceParseSource === "public_dom") {
     return CONF_PARTIAL_DOM;

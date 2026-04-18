@@ -45,6 +45,15 @@ const schema = z.object({
   /** Aliases for buyer storage/profile paths (server-safe naming). */
   BUYER_STATE_PATH: z.string().optional().default(""),
   BUYER_PROFILE_DIR: z.string().optional().default(""),
+  /**
+   * Абсолютный или относительный путь к persistent Chromium-профилю покупателя WB (приоритет над BUYER_PROFILE_DIR).
+   * Пример на сервере: /opt/WB_Repricer/.wb-browser-profile
+   */
+  WB_BROWSER_PROFILE_DIR: z.string().optional().default(""),
+  /**
+   * Headless для мониторинга / проверки сессии (1/true = headless). Пусто → HEADLESS.
+   */
+  WB_BROWSER_HEADLESS: z.string().optional().default(""),
   REPRICER_WEB_DIST_DIR: z.string().default("./apps/web/dist"),
   REPRICER_PUBLIC_DIR: z.string().default("./public"),
   REPRICER_WALLET_CLI_PATH: z.string().default("./dist/walletDom/cli.js"),
@@ -160,6 +169,11 @@ const schema = z.object({
   REPRICER_WB_STATISTICS_PAUSE_MS: z.coerce.number().min(61_000).max(180_000).default(61_000),
   /** nmId для buyer session probe (реальная карточка на витрине) */
   REPRICER_BUYER_PROBE_NMID: z.coerce.number().int().positive().default(130_744_302),
+  /**
+   * 0/false — checkBuyerSession только по главной+кукам (быстро, слабее).
+   * 1/true (по умолчанию) — после проверки кук открыть карточку REPRICER_BUYER_PROBE_NMID и убедиться, что парсится цена WB Кошелька.
+   */
+  REPRICER_BUYER_SESSION_WALLET_PROBE: z.string().optional().default("true"),
   /** Cookie header «валиден» после успешного probe не дольше N минут */
   REPRICER_BUYER_SESSION_TTL_MIN: z.coerce.number().min(5).max(240).default(45),
   /**
@@ -230,6 +244,11 @@ function buildProcessEnv(): Record<string, string | undefined> {
   }
   if (!merged.BUYER_STATE_PATH?.trim()) {
     merged.BUYER_STATE_PATH = merged.REPRICER_WB_STORAGE_STATE_PATH?.trim() || "./data/wb-buyer-storage-state.json";
+  }
+  const wbBrowserProfile = merged.WB_BROWSER_PROFILE_DIR?.trim();
+  if (wbBrowserProfile) {
+    merged.BUYER_PROFILE_DIR = wbBrowserProfile;
+    merged.REPRICER_BUYER_PROFILE_DIR = wbBrowserProfile;
   }
   if (!merged.BUYER_PROFILE_DIR?.trim()) {
     merged.BUYER_PROFILE_DIR = merged.REPRICER_BUYER_PROFILE_DIR?.trim() || "./.wb-browser-profile";

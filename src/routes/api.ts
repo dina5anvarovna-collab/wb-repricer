@@ -69,6 +69,12 @@ import { resolveWalletDomBrowserKind } from "../modules/wbBuyerDom/runWalletCli.
 import { getWbWalletPrice } from "../walletDom/wbWalletPriceParser.js";
 import { getWbWalletPriceWithPublicRetries } from "../walletDom/publicParseRetry.js";
 import { getLastPublicParseProbe, recordPublicParseProbe } from "../lib/publicParseProbeState.js";
+import {
+  getLastBrowserParseProbe,
+  recordBrowserParseProbe,
+} from "../lib/browserParseProbeState.js";
+import { checkBuyerSession } from "../lib/buyerSessionCheck.js";
+import { resolveWbBrowserHeadless } from "../lib/wbBrowserEnv.js";
 import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
 import {
   createEphemeralWalletProfileDir,
@@ -426,6 +432,84 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         removeEphemeralWalletProfileDir(ephemeralProbeDir);
       }
     }
+  });
+
+  /** Проба карточки persistent buyer-профилем (основной контур wallet DOM). */
+  app.post<{ Body: { nmId?: number } }>("/api/settings/parse-probe-browser", async (req, reply) => {
+    if (isBuyerAuthDisabled()) {
+      return reply.code(410).send(buyerAuthDisabledBody());
+    }
+    const raw = req.body?.nmId;
+    const nmId = typeof raw === "number" ? raw : Number(raw);
+    if (!Number.isFinite(nmId) || nmId < 1) {
+      return reply.code(400).send({ error: "Укажите nmId в JSON: { \"nmId\": 123 }" });
+    }
+    const probeProfileDir = resolveBuyerProfileDir();
+    const spp =
+      !(
+        env.REPRICER_MONITOR_SPP_VIA_COOKIES.trim().toLowerCase() === "0" ||
+        env.REPRICER_MONITOR_SPP_VIA_COOKIES.trim().toLowerCase() === "false" ||
+        env.REPRICER_MONITOR_SPP_VIA_COOKIES.trim().toLowerCase() === "no"
+      );
+    try {
+      const result = await getWbWalletPrice({
+        nmId,
+        userDataDir: probeProfileDir,
+        headless: resolveWbBrowserHeadless(),
+        browser: resolveWalletDomBrowserKind(),
+        fetchShowcaseWithCookies: spp,
+        applyPublicBrowserEnv: false,
+        region: env.REPRICER_WALLET_DEST.trim() || undefined,
+      });
+      const okParse =
+        result.parseStatus !== "parse_failed" &&
+        result.parseStatus !== "auth_required" &&
+        result.parseStatus !== "blocked_or_captcha";
+      recordBrowserParseProbe({
+        at: new Date().toISOString(),
+        nmId,
+        ok: okParse,
+        parseStatus: result.parseStatus,
+        blockReason: result.blockReason ?? null,
+        priceParseSource: result.priceParseSource ?? null,
+        confidence: result.sourceConfidence ?? null,
+        browserUrlAfterParse: result.browserUrlAfterParse ?? null,
+        pageTitle: result.pageTitle ?? null,
+        monitorParseContour: "browser_primary",
+        debugArtifactPaths: result.debugArtifactPaths ?? [],
+      });
+      logger.info({ nmId, tag: "parse-probe-browser", ok: okParse }, "browser wallet probe done");
+      return {
+        ok: okParse,
+        parseStatus: result.parseStatus,
+        blockReason: result.blockReason ?? null,
+        priceParseSource: result.priceParseSource ?? null,
+        nmId: result.nmId,
+        showcaseRubEffective: result.showcaseRubEffective ?? null,
+        walletHint: result.priceWallet,
+        browserUrlAfterParse: result.browserUrlAfterParse ?? null,
+        pageTitle: result.pageTitle ?? null,
+        confidence: result.sourceConfidence,
+        debugArtifactPaths: result.debugArtifactPaths ?? [],
+        raw: result,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logger.warn({ nmId, tag: "parse-probe-browser", err: msg }, "browser probe failed");
+      return reply.code(500).send({ ok: false, error: msg });
+    }
+  });
+
+  app.get("/api/browser-parse/status", async () => ({
+    lastBrowserProbe: getLastBrowserParseProbe(),
+  }));
+
+  /** Быстрая проверка buyer-профиля (может занять десятки секунд из-за карточки-probe). */
+  app.get("/api/buyer-session/check", async () => {
+    if (isBuyerAuthDisabled()) {
+      return { disabled: true, reason: "REPRICER_DISABLE_BUYER_AUTH" };
+    }
+    return checkBuyerSession(resolveBuyerProfileDir());
   });
 
   /** Сводка публичного парсинга и safe mode (без buyer-session). */

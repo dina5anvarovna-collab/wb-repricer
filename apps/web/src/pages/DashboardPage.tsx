@@ -19,6 +19,22 @@ type Dashboard = {
     lastMonitorAt: string | null;
     lastMonitorStatus: string | null;
     lastMonitorParseStats?: Record<string, number> | null;
+    lastSuccessfulWalletParseAt?: string | null;
+    riskBuckets?: {
+      captcha: number;
+      authWall: number;
+      blocked: number;
+      safeHold: number;
+      belowMin: number;
+      parseFailed: number;
+      staleLastGood: number;
+      needsReview: number;
+    } | null;
+    healthSummary?: {
+      browserParseOk: boolean;
+      enforcementOk: boolean;
+      publicParseOk: boolean;
+    } | null;
   };
   seller: { configured: boolean; tokenValid: boolean | null; tokenLast4: string | null };
   buyer: {
@@ -110,6 +126,54 @@ export function DashboardPage() {
           hint="POST /api/sync/all"
         />
       </div>
+      <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
+        <h2 className="text-sm font-medium text-white">Здоровье контуров</h2>
+        <ul className="mt-3 grid gap-2 text-sm text-[#c4c9d4] sm:grid-cols-3">
+          <li>
+            Browser parse (job):{" "}
+            <span className={st?.healthSummary?.browserParseOk ? "text-emerald-300" : "text-amber-200"}>
+              {st?.healthSummary?.browserParseOk === true ? "OK" : st?.healthSummary?.browserParseOk === false ? "проблема" : "—"}
+            </span>
+          </li>
+          <li>
+            Public parse:{" "}
+            <span className={st?.healthSummary?.publicParseOk ? "text-emerald-300" : "text-amber-200"}>
+              {st?.healthSummary?.publicParseOk === true ? "OK" : st?.healthSummary?.publicParseOk === false ? "проблема" : "—"}
+            </span>
+          </li>
+          <li>
+            Enforcement:{" "}
+            <span className={st?.healthSummary?.enforcementOk ? "text-emerald-300" : "text-amber-200"}>
+              {st?.healthSummary?.enforcementOk === true ? "OK" : st?.healthSummary?.enforcementOk === false ? "проблема" : "—"}
+            </span>
+          </li>
+          <li className="sm:col-span-3">
+            Последний успешный wallet snapshot:{" "}
+            <span className="text-white">
+              {st?.lastSuccessfulWalletParseAt
+                ? new Date(st.lastSuccessfulWalletParseAt).toLocaleString("ru-RU")
+                : "—"}
+            </span>
+          </li>
+        </ul>
+      </div>
+
+      {st?.riskBuckets ? (
+        <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
+          <h2 className="text-sm font-medium text-white">Risk buckets (снимок SKU)</h2>
+          <div className="mt-3 grid gap-3 text-xs text-[#c4c9d4] sm:grid-cols-4">
+            <div>Капча (оценка): {st.riskBuckets.captcha}</div>
+            <div>Auth wall: {st.riskBuckets.authWall}</div>
+            <div>Safe hold: {st.riskBuckets.safeHold}</div>
+            <div>Ниже мин.: {st.riskBuckets.belowMin}</div>
+            <div>Parse failed: {st.riskBuckets.parseFailed}</div>
+            <div>Stale last good: {st.riskBuckets.staleLastGood}</div>
+            <div>Нужен разбор: {st.riskBuckets.needsReview}</div>
+            <div className="text-[#5a6170]">Blocked (отдельно): {st.riskBuckets.blocked}</div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid gap-4 md:grid-cols-2">
         <div className="rounded-xl border border-[#252a33] bg-[#13161c] p-5">
           <h2 className="text-sm font-medium text-white">Токен продавца</h2>

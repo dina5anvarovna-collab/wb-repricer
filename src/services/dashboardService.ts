@@ -15,6 +15,7 @@ import {
 } from "../modules/catalogSync/syncCatalog.js";
 import { validateSellerToken } from "../modules/wbSellerApi/client.js";
 import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
+import { buildProductionHealthSummary } from "../modules/health/productionHealth.js";
 
 export async function buildSellerStatusPayload() {
   const cabinet = await prisma.sellerCabinet.findFirst({ where: { isActive: true } });
@@ -106,6 +107,7 @@ export async function buildExtendedDashboardPayload() {
     lastCatalogSync,
     safeHoldCount,
     lastGoodSample,
+    productionSummary,
   ] = await Promise.all([
     buildSellerStatusPayload(),
     prisma.wbProduct.count({ where: { lastEvaluationStatus: "below_min" } }),
@@ -138,6 +140,7 @@ export async function buildExtendedDashboardPayload() {
         safeModeHold: true,
       },
     }),
+    buildProductionHealthSummary(),
   ]);
   return {
     ...statusBase,
@@ -164,6 +167,13 @@ export async function buildExtendedDashboardPayload() {
         lastMonitor?.finishedAt?.toISOString() ?? lastMonitor?.startedAt.toISOString() ?? null,
       lastMonitorStatus: lastMonitor?.status ?? null,
       lastMonitorParseStats,
+      riskBuckets: productionSummary.riskBuckets,
+      lastSuccessfulWalletParseAt: productionSummary.lastSuccessfulWalletParseAt,
+      healthSummary: {
+        browserParseOk: productionSummary.browserParse.ok,
+        enforcementOk: productionSummary.enforcement.ok,
+        publicParseOk: productionSummary.publicParse.ok,
+      },
     },
   };
 }
