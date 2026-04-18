@@ -48,6 +48,14 @@ export function looksLikeLoadedWbProductCard(input: {
   return hasCurrency && hasCommerceSignal && (wbContext || nmInUrl);
 }
 
+/**
+ * Ветвление блокировок:
+ * 1) Явная капча / антибот в тексте — всегда приоритет (это не «карточка товара»).
+ * 2) Если DOM похож на загруженную карточку WB — **полностью игнорируем HTTP-статус** и не
+ *    выставляем http_error; также не применяем редирект nmId / короткое тело / auth-эвристику
+ *    как блок (legacy blocked_or_captcha от этих веток).
+ * 3) Иначе — обычные эвристики и в конце проверка HTTP ответа документа.
+ */
 export function detectPublicParseBlockSignals(input: DetectBlockInput): {
   reason: PublicParseBlockReason;
   legacyParseStatus: "blocked_or_captcha" | "auth_required" | null;
@@ -70,6 +78,16 @@ export function detectPublicParseBlockSignals(input: DetectBlockInput): {
     return { reason: "anti_bot_page", legacyParseStatus: "blocked_or_captcha" };
   }
 
+  const domIsProductCard = looksLikeLoadedWbProductCard({
+    bodyText: input.bodyText,
+    pageUrl: input.pageUrl,
+    expectedNmId: input.expectedNmId,
+  });
+
+  if (domIsProductCard) {
+    return { reason: "ok", legacyParseStatus: null };
+  }
+
   if (
     /security\/login|passport\.wildberries|oauth\.wildberries/i.test(u) ||
     (t.length < 500 &&
@@ -87,22 +105,8 @@ export function detectPublicParseBlockSignals(input: DetectBlockInput): {
     return { reason: "unexpected_redirect", legacyParseStatus: "blocked_or_captcha" };
   }
 
-  /** DOM > HTTP: полноценная карточка не считается блоком из‑за статуса ответа. */
-  if (
-    looksLikeLoadedWbProductCard({
-      bodyText: input.bodyText,
-      pageUrl: input.pageUrl,
-      expectedNmId: input.expectedNmId,
-    })
-  ) {
-    return { reason: "ok", legacyParseStatus: null };
-  }
-
   if (typeof status === "number" && (status >= 400 || status === 0)) {
-    /** 498 часто приходит при нормальной гидратации карточки — не блокируем по одному числу. */
-    if (status !== 498) {
-      return { reason: "http_error", legacyParseStatus: null };
-    }
+    return { reason: "http_error", legacyParseStatus: null };
   }
 
   if (t.length < 120 && !/wildberries|wb\.ru/i.test(t)) {

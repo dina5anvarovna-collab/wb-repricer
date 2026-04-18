@@ -2118,7 +2118,12 @@ async function scrapeWalletPriceOnPage(
         })
       ).paths;
       const parseStatusBlocked: WalletParseStatus =
-        sig.legacyParseStatus ?? (sig.reason === "auth_required" ? "auth_required" : "blocked_or_captcha");
+        sig.legacyParseStatus ??
+        (sig.reason === "auth_required"
+          ? "auth_required"
+          : sig.reason === "http_error"
+            ? "parse_failed"
+            : "blocked_or_captcha");
       return {
         nmId,
         url,
@@ -2138,7 +2143,9 @@ async function scrapeWalletPriceOnPage(
             ? "page_blocked_captcha"
             : sig.reason === "anti_bot_page"
               ? "page_blocked_antibot"
-              : "page_blocked",
+              : sig.reason === "http_error"
+                ? "page_http_error"
+                : "page_blocked",
         browserUrlAfterParse: page.url(),
         blockReason: sig.reason,
         pageTitle: pageTitleEarly,
