@@ -123,6 +123,33 @@ export function destStringToNumber(s: string | null | undefined): number | null 
   return Number.isFinite(n) ? n : null;
 }
 
+/** Зачёркнутая «regular» в buyer-слое каталога — только из кабинета (seller API), не из DOM снимка. */
+export function sellerCabinetRegularRub(p: Pick<WbProduct, "sellerPrice" | "discountedPriceRub">): number | null {
+  return toUnifiedRub(p.discountedPriceRub ?? p.sellerPrice ?? null);
+}
+
+/** nonWalletRub не должен совпадать с ценой продавца из API (иначе это не buyer СПП). */
+export function sanitizeNonWalletRubAgainstSeller(
+  nonWalletRub: number | null | undefined,
+  seller: SellerSidePricesJson,
+): number | null {
+  const nw = toUnifiedRub(nonWalletRub);
+  if (nw == null) return null;
+  const cab = seller.sellerDiscountPriceRub ?? seller.sellerPriceRub ?? null;
+  if (cab != null && Math.abs(nw - Math.round(cab)) <= 1) return null;
+  return nw;
+}
+
+/** Инвариант витрины: showcase = wallet (или оба null). */
+export function syncShowcaseRubWithWalletRub(buyer: BuyerSidePricesJson): BuyerSidePricesJson {
+  const w = buyer.walletRub;
+  return {
+    ...buyer,
+    showcaseRub: w ?? null,
+    walletRub: w ?? null,
+  };
+}
+
 export function buildUnifiedObservation(
   seller: SellerSidePricesJson,
   buyer: BuyerSidePricesJson,

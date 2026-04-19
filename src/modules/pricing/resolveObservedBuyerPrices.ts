@@ -3,6 +3,7 @@ import type { BuyerDomResult } from "../wbBuyerDom/runWalletCli.js";
 import { env } from "../../config/env.js";
 import type { MonitorFallbackPrices } from "../priceMonitor/monitorPriceFallback.js";
 import type { BuyerPriceVerificationSnapshot } from "./buyerPriceVerification.js";
+import { applyBuyerVerificationCrossCheck, canPersistVerifiedWalletTruth } from "./buyerVerificationCrossCheck.js";
 
 type FallbackContext = {
   discountedPriceRub: number | null;
@@ -143,6 +144,8 @@ export function resolveObservedBuyerPrices(input: {
   expectedNmId?: number | null;
   expectedDest?: string | null;
   fallbackContext: FallbackContext;
+  /** Количество регионов в текущем прогоне монитора; при >1 финальный VERIFIED только после batch (каталог). */
+  monitorBatchDestCount?: number | null;
 }): ResolvedObservedBuyerPrices {
   const { dom, stockLevel, fallbackContext } = input;
   const verification = finalizeVerificationFromDom(dom, fallbackContext.sellerPrice);
@@ -212,7 +215,7 @@ export function resolveObservedBuyerPrices(input: {
       : domWalletObserved != null
         ? "fallback"
         : "unverified";
-  const topPriceFound = buyerWallet != null;
+  let topPriceFound = buyerWallet != null;
 
   /**
    * Новая модель:
@@ -281,12 +284,9 @@ export function resolveObservedBuyerPrices(input: {
   let walletDiscountPercent = percent(walletDiscountRub, priceWithoutWalletRub);
   let sppPercent = percent(sppRub, sellerDiscountPriceRub);
 
-  let sourceConfidence: "high" | "medium" | "low" =
-    verification.verificationMethod === "dom_wallet" ? "high" : verification.verificationStatus === "VERIFIED" ? "high" : "low";
-
   const buyerRegularSource = "formula_seller_discount_minus_spp";
 
-  const hasUsablePrice =
+  let hasUsablePrice =
     (buyerWallet != null && Number.isFinite(buyerWallet) && buyerWallet > 0) ||
     (buyerRegular != null && Number.isFinite(buyerRegular) && buyerRegular > 0) ||
     (parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0) ||
@@ -408,8 +408,64 @@ export function resolveObservedBuyerPrices(input: {
     }
   }
 
+  const verificationFinal = applyBuyerVerificationCrossCheck(
+    {
+      parseStatus: parseStatusRaw,
+      regionPriceAmbiguous: dom.regionPriceAmbiguous,
+      sourceConflictDetected: dom.sourceConflictDetected,
+    },
+    verification,
+    blockedBySafetyRule,
+  );
+
+  const persistWalletTruth = canPersistVerifiedWalletTruth({
+    verification: verificationFinal,
+    blockedBySafetyRule,
+    regionPriceAmbiguous: dom.regionPriceAmbiguous ?? null,
+    parseStatus: parseStatusRaw,
+  });
+
+  if (!persistWalletTruth) {
+    buyerWallet = null;
+    showcaseRub = null;
+    parseMode = "unverified";
+    walletSource = "wallet_truth_suppressed";
+    fallback.buyerWallet = null;
+    walletDiscountRub =
+      showcaseRub != null && priceWithoutWalletRub != null
+        ? Math.max(0, Math.round(priceWithoutWalletRub - showcaseRub))
+        : null;
+    walletDiscountPercent = percent(walletDiscountRub, priceWithoutWalletRub);
+  }
+
+  /** Инвариант: showcaseRub === walletRub (или оба null). */
+  if (persistWalletTruth && buyerWallet != null && buyerWallet > 0) {
+    const w = Math.round(buyerWallet);
+    buyerWallet = w;
+    showcaseRub = w;
+    walletDiscountRub =
+      showcaseRub != null && priceWithoutWalletRub != null
+        ? Math.max(0, Math.round(priceWithoutWalletRub - showcaseRub))
+        : null;
+    walletDiscountPercent = percent(walletDiscountRub, priceWithoutWalletRub);
+  }
+
+  topPriceFound =
+    (buyerWallet != null && Number.isFinite(buyerWallet) && buyerWallet > 0) ||
+    (priceWithoutWalletRub != null && Number.isFinite(priceWithoutWalletRub) && priceWithoutWalletRub > 0);
+
+  hasUsablePrice =
+    (buyerWallet != null && Number.isFinite(buyerWallet) && buyerWallet > 0) ||
+    (buyerRegular != null && Number.isFinite(buyerRegular) && buyerRegular > 0) ||
+    (parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0) ||
+    (parserShowcase != null && parserShowcase > 0);
+
+  let sourceConfidence: "high" | "medium" | "low";
   const confidence: "HIGH" | "MEDIUM" | "LOW" =
-    verification.verificationMethod === "dom_wallet" && showcaseRub != null && showcaseRub > 0
+    verificationFinal.verificationMethod === "dom_wallet" &&
+    verificationFinal.verificationStatus === "VERIFIED" &&
+    showcaseRub != null &&
+    showcaseRub > 0
       ? "HIGH"
       : showcaseRub != null &&
           priceWithoutWalletRub != null &&
@@ -421,21 +477,47 @@ export function resolveObservedBuyerPrices(input: {
           : "LOW";
   sourceConfidence = confidence === "HIGH" ? "high" : confidence === "MEDIUM" ? "medium" : "low";
   const strongWalletSignal =
+    persistWalletTruth &&
     topPriceFound === true &&
     showcaseRub != null &&
     showcaseRub > 0 &&
     (dom.walletConfirmed === true && toRub(dom.walletRub) != null
       ? true
-      : verification.verificationStatus === "VERIFIED" &&
-        verification.verificationMethod === "dom_wallet" &&
-        verification.trustedSource === "product_page_wallet_selector");
-  const repricingAllowed =
+      : verificationFinal.verificationStatus === "VERIFIED" &&
+        verificationFinal.verificationMethod === "dom_wallet" &&
+        verificationFinal.trustedSource === "product_page_wallet_selector");
+  let repricingAllowed =
     strongWalletSignal &&
     (expectedDest == null ? true : regionConfirmedComposite) &&
     !(dom.regionPriceAmbiguous === true && !regionConfirmedByStableReload);
-  const repricingAllowedReason = repricingAllowed
+  let repricingAllowedReason = repricingAllowed
     ? "strong_wallet_plus_region_confirmation"
-    : [verification.verificationReason, ...blockedBySafetyRule].filter(Boolean).join(";");
+    : [verificationFinal.verificationReason, ...blockedBySafetyRule].filter(Boolean).join(";");
+
+  const batchMulti = (input.monitorBatchDestCount ?? 1) > 1;
+  let buyerVerificationOut: BuyerPriceVerificationSnapshot = {
+    ...verificationFinal,
+    repricingAllowed,
+  };
+  if (batchMulti) {
+    repricingAllowed = false;
+    repricingAllowedReason = [repricingAllowedReason, "monitor_multi_dest_pending"].filter(Boolean).join(";");
+    buyerVerificationOut = {
+      ...verificationFinal,
+      verificationStatus: "UNVERIFIED",
+      verificationReason: [
+        verificationFinal.verificationReason,
+        "monitor_multi_dest_pending_batch_truth_on_catalog_aggregate",
+      ]
+        .filter(Boolean)
+        .join(";"),
+      repricingAllowed: false,
+      trustedSource: "none",
+      verificationMethod: "unverified",
+      walletPriceVerified: null,
+      showcaseWalletPrice: null,
+    };
+  }
 
   return {
     basePriceRub,
@@ -466,13 +548,13 @@ export function resolveObservedBuyerPrices(input: {
     blockedBySafetyRule,
     verificationSource:
       dom.verificationSource ??
-      (verification.verificationMethod === "dom_wallet"
+      (verificationFinal.verificationMethod === "dom_wallet"
         ? "product_page_wallet_selector"
         : "unverified"),
-    trustedSource: verification.trustedSource,
+    trustedSource: verificationFinal.trustedSource,
     sourcePriority: typeof dom.sourcePriority === "string" ? dom.sourcePriority : null,
     sourceConflictDetected: dom.sourceConflictDetected === true,
-    buyerPriceVerification: verification,
+    buyerPriceVerification: buyerVerificationOut,
     sppCalcSource,
     sppCalcReason,
     destApplied: typeof dom.destApplied === "boolean" ? dom.destApplied : null,

@@ -25,6 +25,7 @@ import {
   removeEphemeralWalletProfileDir,
 } from "../../lib/ephemeralWalletProfile.js";
 import { resolveObservedBuyerPrices } from "../pricing/resolveObservedBuyerPrices.js";
+import { canPersistVerifiedWalletTruth } from "../pricing/buyerVerificationCrossCheck.js";
 import {
   aggregateTrustedProductSnapshot,
   buildBuyerRegionalSnapshotFromResolved,
@@ -338,6 +339,7 @@ export async function runPriceMonitorJob(opts: {
         stockLevel,
         expectedNmId: p.nmId,
         expectedDest: destKey,
+        monitorBatchDestCount: destList.length,
         fallbackContext: {
           discountedPriceRub: p.discountedPriceRub,
           targetRub,
@@ -349,6 +351,12 @@ export async function runPriceMonitorJob(opts: {
           lastRegularObservedRub: p.lastRegularObservedRub,
           lastWalletObservedRub: p.lastWalletObservedRub,
         },
+      });
+      const persistVerifiedWallet = canPersistVerifiedWalletTruth({
+        verification: resolved.buyerPriceVerification,
+        blockedBySafetyRule: resolved.blockedBySafetyRule,
+        regionPriceAmbiguous: resolved.regionPriceAmbiguous ?? null,
+        parseStatus: parseStatus ?? "",
       });
       let buyerWallet = resolved.buyerWallet;
       let showcaseRub = resolved.showcaseRub;
@@ -531,17 +539,16 @@ export async function runPriceMonitorJob(opts: {
 
       const sellerBasePriceRub =
         p.sellerPrice != null && Number.isFinite(p.sellerPrice) ? Math.round(p.sellerPrice) : null;
-      const confirmedWalletRub =
-        dom.walletConfirmed === true && dom.walletRub != null && Number.isFinite(dom.walletRub) && dom.walletRub > 0
-          ? Math.round(dom.walletRub)
-          : null;
+      const canonicalBuyerWalletRub =
+        persistVerifiedWallet && showcaseRub != null && showcaseRub > 0 ? Math.round(showcaseRub) : null;
+      const sellerCabinetRegular = toUnifiedRub(p.discountedPriceRub ?? p.sellerPrice ?? null);
       const unifiedPrice = buildUnifiedObservation(
         buildSellerSideFromWbProduct(p),
         {
-          showcaseRub: toUnifiedRub(showcaseRub),
-          walletRub: toUnifiedRub(confirmedWalletRub),
+          showcaseRub: toUnifiedRub(canonicalBuyerWalletRub),
+          walletRub: toUnifiedRub(canonicalBuyerWalletRub),
           nonWalletRub: toUnifiedRub(priceWithoutWalletRub),
-          priceRegular: toUnifiedRub(dom.priceRegular ?? null),
+          priceRegular: sellerCabinetRegular,
         },
         {
           region: regionLabelForDest(destKey),
@@ -644,6 +651,8 @@ export async function runPriceMonitorJob(opts: {
         walletEvidence: dom.walletEvidence ?? null,
         parserWalletRub: dom.walletRub ?? null,
         parserNonWalletRub: dom.nonWalletRub ?? null,
+        batchMonitorDestCount: destList.length,
+        batchMultiDestPending: destList.length > 1,
       });
 
       await prisma.priceSnapshot.create({
@@ -653,11 +662,11 @@ export async function runPriceMonitorJob(opts: {
           sellerPrice: p.sellerPrice,
           sellerDiscountPctSnapshot: p.sellerDiscount ?? null,
           priceRegular: dom.priceRegular ?? null,
-          showcaseRub,
-          walletRub: confirmedWalletRub,
+          showcaseRub: canonicalBuyerWalletRub,
+          walletRub: canonicalBuyerWalletRub,
           nonWalletRub: priceWithoutWalletRub,
           buyerRegularPrice: priceWithoutWalletRub,
-          buyerWalletPrice: showcaseRub,
+          buyerWalletPrice: canonicalBuyerWalletRub,
           walletConfirmed: dom.walletConfirmed === true,
           walletEvidence: dom.walletEvidence ?? null,
           sellerDiscountedSnapshotRub: p.discountedPriceRub,
@@ -702,11 +711,14 @@ export async function runPriceMonitorJob(opts: {
             lastWalletParseStatus: parseStatus,
             lastEvaluationStatus: evaluationStatus,
             ...(stockLevel === "IN_STOCK" ? { lastSeenInStock: new Date() } : {}),
-            ...(parseRecovered && showcaseRub != null && showcaseRub > 0
+            ...(parseRecovered &&
+            showcaseRub != null &&
+            showcaseRub > 0 &&
+            persistVerifiedWallet
               ? {
                   lastWalletObservedRub: showcaseRub,
                   lastKnownShowcaseRub: Math.round(showcaseRub),
-                  lastKnownWalletRub: confirmedWalletRub ?? null,
+                  lastKnownWalletRub: canonicalBuyerWalletRub ?? null,
                   lastPriceSeenAt: new Date(),
                   lastPriceSource: buyerRegularSource,
                   walletRubLastGood: Math.round(showcaseRub),

@@ -1,12 +1,15 @@
 import type { MinPriceRule, PriceSnapshot, WbProduct } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
+import { computeBatchBuyerTruth, type BatchBuyerTruthResult } from "./batchBuyerTruth.js";
 import {
   buildBuyerSideFromPriceSnapshot,
-  buildBuyerSideFromWbProductFallbackChain,
   buildSellerSideFromWbProduct,
   buildUnifiedObservation,
   destStringToNumber,
+  sanitizeNonWalletRubAgainstSeller,
+  sellerCabinetRegularRub,
+  syncShowcaseRubWithWalletRub,
   type BuyerSidePricesJson,
   type SellerSidePricesJson,
   type UnifiedPriceObservationJson,
@@ -206,23 +209,6 @@ export function shouldSuppressAmbiguousDomWallet(meta: BuyerVerificationMeta): b
   );
 }
 
-/**
- * При ambiguous/unverified DOM wallet: не экспортировать wallet/showcase как подтверждённую витрину кошелька;
- * nonWallet оставить из снимка; priceRegular — из seller API при отсутствии надёжной buyer зачёркнутой.
- */
-function sanitizeBuyerSideAfterAmbiguousWallet(
-  buyer: BuyerSidePricesJson,
-  seller: SellerSidePricesJson,
-): BuyerSidePricesJson {
-  return {
-    showcaseRub: null,
-    walletRub: null,
-    nonWalletRub: buyer.nonWalletRub,
-    priceRegular:
-      seller.sellerDiscountPriceRub ?? seller.sellerPriceRub ?? buyer.priceRegular,
-  };
-}
-
 function snapshotPriceMeta(snapshot: PriceSnapshot, walletRub: number | null, regularRub: number | null): SnapshotPriceMeta {
   let dj: Record<string, unknown> = {};
   try {
@@ -357,6 +343,9 @@ export type ProductTableRow = WbProduct & {
   pricingStatusHint: string | null;
   /** Верификация buyer-facing цен по основному региону (из detailJson). */
   buyerVerificationStatus: "VERIFIED" | "UNVERIFIED" | null;
+  /** Итог после сверки всех выбранных регионов (мониторинг batch). */
+  batchBuyerVerificationStatus?: "VERIFIED" | "UNVERIFIED";
+  batchBuyerVerificationReason?: string | null;
   buyerVerificationReason: string | null;
   repricingAllowed: boolean | null;
   verificationSource:
@@ -415,28 +404,40 @@ function humanRegionLabel(
   return "Профиль по умолчанию";
 }
 
-function buyerSideHasSignal(b: BuyerSidePricesJson): boolean {
-  return (
-    b.walletRub != null ||
-    b.nonWalletRub != null ||
-    b.showcaseRub != null ||
-    b.priceRegular != null
-  );
-}
-
 /**
- * Primary buyer model для строки каталога: нормализованный снимок (как parse-probe),
- * иначе единая fallback-цепочка по WbProduct (без размазанных last* по коду).
+ * Canonical buyer для API/UI: только после batch-проверки регионов; без legacy last* как truth.
+ * priceRegular — из seller API (кабинет), не из DOM снимка.
  */
-function catalogPrimaryBuyerSide(
+function catalogCanonicalBuyerUnified(
   primarySnap: PriceSnapshot | null,
-  p: WbProduct,
+  seller: SellerSidePricesJson,
+  cabinetRegularRub: number | null,
+  batchTruth: BatchBuyerTruthResult,
 ): BuyerSidePricesJson {
-  if (primarySnap != null) {
-    const fromSnap = buildBuyerSideFromPriceSnapshot(primarySnap);
-    if (buyerSideHasSignal(fromSnap)) return fromSnap;
+  const reg = cabinetRegularRub;
+  if (batchTruth.batchVerificationStatus === "VERIFIED" && batchTruth.effectiveWalletRub != null) {
+    const nw = sanitizeNonWalletRubAgainstSeller(
+      primarySnap ? buildBuyerSideFromPriceSnapshot(primarySnap).nonWalletRub : null,
+      seller,
+    );
+    const w = batchTruth.effectiveWalletRub;
+    return syncShowcaseRubWithWalletRub({
+      showcaseRub: w,
+      walletRub: w,
+      nonWalletRub: nw,
+      priceRegular: reg,
+    });
   }
-  return buildBuyerSideFromWbProductFallbackChain(p);
+  const nwOnly = sanitizeNonWalletRubAgainstSeller(
+    primarySnap ? buildBuyerSideFromPriceSnapshot(primarySnap).nonWalletRub : null,
+    seller,
+  );
+  return {
+    showcaseRub: null,
+    walletRub: null,
+    nonWalletRub: nwOnly,
+    priceRegular: reg,
+  };
 }
 
 /**
@@ -486,9 +487,8 @@ function pricingStatusHintForRow(
 /**
  * Обогащение строк каталога для `/api/catalog/products*`.
  *
- * **Источник truth (buyer):** нормализованный `PriceSnapshot` (как parse-probe) через
- * `buildBuyerSideFromPriceSnapshot`; при пустом снимке — `buildBuyerSideFromWbProductFallbackChain`
- * (кэш карточки → walletRubLastGood → legacy last*).
+ * **Источник truth (buyer):** последние `PriceSnapshot` по регионам + **batch**-верификация
+ * (`computeBatchBuyerTruth`). Legacy `last*` на карточке не поднимаются как основная truth для wallet/showcase.
  *
  * **Seller:** только кабинет `WbProduct` → `buildSellerSideFromWbProduct`.
  *
@@ -636,7 +636,27 @@ export async function enrichProductsForTable(
       };
     });
 
-    const finals = regionBreakdown
+    const batchSnaps = destOrder
+      .map((d) => snapshotForDest(perDest, d.trim()))
+      .filter((s): s is PriceSnapshot => s != null);
+    const batchTruth = computeBatchBuyerTruth({
+      regionSnapshots: batchSnaps,
+      monitorRegionCount: destOrder.length,
+    });
+
+    const regionBreakdownBatched: RegionPriceRow[] = regionBreakdown.map((r) => {
+      if (batchTruth.batchVerificationStatus !== "VERIFIED") {
+        return {
+          ...r,
+          verificationStatus: "UNVERIFIED",
+          walletPriceRub: null,
+          walletDiscountRub: null,
+        };
+      }
+      return r;
+    });
+
+    const finals = regionBreakdownBatched
       .filter(
         (r) =>
           r.verificationStatus === "VERIFIED" &&
@@ -645,10 +665,10 @@ export async function enrichProductsForTable(
           r.walletPriceRub > 0,
       )
       .map((r) => r.walletPriceRub as number);
-    let sppPercentFromDiscounted = regionBreakdown
+    let sppPercentFromDiscounted = regionBreakdownBatched
       .map((r) => r.sppPercent)
       .find((v) => v != null && Number.isFinite(v)) ?? null;
-    const catalogPriceHeadline = buildCatalogPriceHeadline(regionBreakdown, discBase);
+    const catalogPriceHeadline = buildCatalogPriceHeadline(regionBreakdownBatched, discBase);
     if (catalogPriceHeadline?.sppPercent != null && Number.isFinite(catalogPriceHeadline.sppPercent)) {
       sppPercentFromDiscounted = catalogPriceHeadline.sppPercent;
     }
@@ -665,7 +685,7 @@ export async function enrichProductsForTable(
       const primarySnap = snapshotForDest(perDest, primaryDest);
       primarySnapshot = primarySnap ?? null;
       primaryVerificationMeta = buyerVerificationMeta(primarySnapshot);
-      const row = regionBreakdown.find((r) => r.dest === primaryDest);
+      const row = regionBreakdownBatched.find((r) => r.dest === primaryDest);
       if (row) {
         primaryRegion = {
           dest: row.dest,
@@ -693,29 +713,12 @@ export async function enrichProductsForTable(
         (primaryRegion.walletPriceRub != null && primaryRegion.walletPriceRub > 0) ||
         (primaryRegion.regularPriceRub != null && primaryRegion.regularPriceRub > 0);
       if (!hasSnapshotPrices) {
-        const fb = catalogPrimaryBuyerSide(primarySnapshot, p);
-        const suppressWallet = shouldSuppressAmbiguousDomWallet(primaryVerificationMeta);
-        let walletPriceRub = suppressWallet
-          ? primaryRegion.walletPriceRub ?? null
-          : primaryRegion.walletPriceRub ?? fb.walletRub ?? fb.showcaseRub ?? null;
-        let regularPriceRub = primaryRegion.regularPriceRub ?? fb.nonWalletRub ?? null;
-        ({ wallet: walletPriceRub, regular: regularPriceRub } = enforceWalletNotAboveSpp(
-          walletPriceRub,
-          regularPriceRub,
-        ));
-        const walletDiscountRub =
-          walletPriceRub != null && regularPriceRub != null
-            ? Math.max(0, Math.round(regularPriceRub - walletPriceRub))
-            : null;
-        const sppPercent = null;
         primaryRegion = {
           ...primaryRegion,
-          walletPriceRub,
-          regularPriceRub,
-          sppPercent,
-          walletDiscountRub,
-          sourceConfidence: null,
-          priceParseMode: "fallback",
+          walletPriceRub: null,
+          walletDiscountRub: null,
+          sppPercent: null,
+          priceParseMode: primarySnapshot ? "unverified" : null,
         };
       }
       if (sppPercentFromDiscounted == null && primaryRegion.sppPercent != null) {
@@ -724,10 +727,8 @@ export async function enrichProductsForTable(
     }
 
     const seller = buildSellerSideFromWbProduct(p);
-    let buyerPrimary = catalogPrimaryBuyerSide(primarySnapshot, p);
-    if (shouldSuppressAmbiguousDomWallet(primaryVerificationMeta)) {
-      buyerPrimary = sanitizeBuyerSideAfterAmbiguousWallet(buyerPrimary, seller);
-    }
+    const cabinetRegularRub = sellerCabinetRegularRub(p);
+    const buyerPrimary = catalogCanonicalBuyerUnified(primarySnapshot, seller, cabinetRegularRub, batchTruth);
     const unified = buildUnifiedObservation(seller, buyerPrimary, {
       region: primaryRegion?.label ?? null,
       dest: primaryDest != null ? destStringToNumber(primaryDest) : null,
@@ -743,42 +744,53 @@ export async function enrichProductsForTable(
 
     const pricingStatusHint = pricingStatusHintForRow(p, fixedOrMinRub, primaryBuyerFinalForHint);
     const verificationMeta = primaryVerificationMeta;
-    const totalRegionsCount = regionBreakdown.length;
-    const validRegionsCount = regionBreakdown.filter(
+    const totalRegionsCount = regionBreakdownBatched.length;
+    const validRegionsCount = regionBreakdownBatched.filter(
       (r) =>
+        batchTruth.batchVerificationStatus === "VERIFIED" &&
         r.verificationStatus === "VERIFIED" &&
         (r.confidenceLevel === "HIGH" || r.confidenceLevel === "MEDIUM") &&
         r.walletPriceRub != null &&
         r.priceParseMode !== "fallback",
     ).length;
     const frontStatus: "VERIFIED" | "PARTIAL" | "UNVERIFIED" =
-      validRegionsCount <= 0
+      batchTruth.batchVerificationStatus !== "VERIFIED"
         ? "UNVERIFIED"
-        : validRegionsCount < Math.max(totalRegionsCount, 1)
-          ? "PARTIAL"
-          : "VERIFIED";
+        : validRegionsCount <= 0
+          ? "UNVERIFIED"
+          : validRegionsCount < Math.max(totalRegionsCount, 1)
+            ? "PARTIAL"
+            : "VERIFIED";
     const safeModeRecommendationOnly = ["1", "true", "yes", "on"].includes(
       env.REPRICER_ENFORCE_CRON_DRY_RUN.trim().toLowerCase(),
     );
     const repricingSummary = computeRepricingSummary({
-      regions: regionBreakdown,
+      regions: regionBreakdownBatched,
       sellerMinPriceRub: fixedOrMinRub,
       sellerCabinetPriceRub: p.sellerPrice,
       safeModeRecommendationOnly,
     });
+
+    const repricingAllowedRow =
+      batchTruth.batchVerificationStatus === "VERIFIED" && verificationMeta.repricingAllowed === true;
 
     return {
       ...p,
       fixedOrMinRub,
       showcaseFinalRub,
       sppPercentFromDiscounted,
-      regionBreakdown,
+      regionBreakdown: regionBreakdownBatched,
       primaryRegion,
       catalogPriceHeadline,
       pricingStatusHint,
-      buyerVerificationStatus: verificationMeta.verificationStatus,
-      buyerVerificationReason: verificationMeta.verificationReason,
-      repricingAllowed: verificationMeta.repricingAllowed,
+      buyerVerificationStatus: batchTruth.batchVerificationStatus,
+      batchBuyerVerificationStatus: batchTruth.batchVerificationStatus,
+      batchBuyerVerificationReason: batchTruth.batchVerificationReason,
+      buyerVerificationReason:
+        batchTruth.batchVerificationStatus === "VERIFIED"
+          ? verificationMeta.verificationReason
+          : batchTruth.batchVerificationReason,
+      repricingAllowed: repricingAllowedRow,
       verificationSource: verificationMeta.verificationSource,
       confidence: verificationMeta.confidence,
       repricingAllowedReason: verificationMeta.repricingAllowedReason,

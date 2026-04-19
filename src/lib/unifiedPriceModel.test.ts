@@ -2,7 +2,39 @@ import { describe, expect, it } from "vitest";
 import {
   buildBuyerSideFromPriceSnapshot,
   buildBuyerSideFromWbProductFallbackChain,
+  sanitizeNonWalletRubAgainstSeller,
+  sellerCabinetRegularRub,
+  syncShowcaseRubWithWalletRub,
 } from "./unifiedPriceModel.js";
+
+describe("sellerCabinetRegularRub / sanitizeNonWalletRubAgainstSeller", () => {
+  it("maps priceRegular from discounted seller price", () => {
+    expect(sellerCabinetRegularRub({ sellerPrice: 2000, discountedPriceRub: 1500 })).toBe(1500);
+  });
+
+  it("drops nonWallet equal to seller cabinet discount price", () => {
+    const seller = {
+      sellerPriceRub: 2000,
+      sellerDiscountPct: null,
+      sellerDiscountPriceRub: 1500,
+    };
+    expect(sanitizeNonWalletRubAgainstSeller(1500, seller)).toBeNull();
+    expect(sanitizeNonWalletRubAgainstSeller(1400, seller)).toBe(1400);
+  });
+});
+
+describe("syncShowcaseRubWithWalletRub", () => {
+  it("forces showcase === wallet", () => {
+    const b = syncShowcaseRubWithWalletRub({
+      showcaseRub: 999,
+      walletRub: 500,
+      nonWalletRub: null,
+      priceRegular: null,
+    });
+    expect(b.showcaseRub).toBe(500);
+    expect(b.walletRub).toBe(500);
+  });
+});
 
 describe("buildBuyerSideFromPriceSnapshot", () => {
   it("joins walletRub with legacy buyerWalletPrice column", () => {
