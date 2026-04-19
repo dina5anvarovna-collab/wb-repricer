@@ -483,8 +483,8 @@ export type WalletParserResult = {
   /** Диагностика: как выбрана nonWalletRub (см. nonWalletRubResolution). */
   nonWalletEvidence?: string | null;
   nonWalletSource?: string | null;
-  /** Карточный/API fallback (ev-код из nonWalletRubResolution). */
-  nonWalletFallbackUsed?: string | null;
+  /** Карточный/API fallback: финальный шаг cardApiShowcaseRub vs walletRub. */
+  nonWalletFallbackUsed?: boolean;
   /** Кандидаты для диагностики parse-probe. */
   nonWalletCandidateValues?: Record<string, number | null>;
   walletConfirmed?: boolean;

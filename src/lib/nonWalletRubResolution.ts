@@ -7,9 +7,9 @@ export type NonWalletRubDetail = {
   nonWalletEvidence: string | null;
   /** Короткий код источника для downstream */
   nonWalletSource: string | null;
-  /** Карточный/API fallback (не spp DOM и не buyer verification priceWithoutWallet). */
-  nonWalletFallbackUsed: string | null;
-  /** Все значимые кандидаты для диагностики parse-probe */
+  /** Сработал финальный fallback по cardApiShowcaseRub vs walletRub */
+  nonWalletFallbackUsed: boolean;
+  /** Значимые кандидаты для диагностики parse-probe */
   nonWalletCandidateValues: Record<string, number | null>;
 };
 
@@ -20,27 +20,12 @@ function toRub(v: unknown): number | null {
   return Math.round(n);
 }
 
-function apiWalletChain(base: WalletParserResult, orc: ShowcaseOrchestratorResult | null): number | null {
-  return toRub(orc?.apiWalletRub) ?? toRub(base.apiWalletRub) ?? toRub(base.cardApiWalletRub);
-}
-
-/** Прямой витринный рубль с card.wb.ru (без orc.apiShowcaseRub, который может совпадать с кошельком). */
-function cardApiShowcaseDirect(base: WalletParserResult): number | null {
-  return toRub(base.cardApiShowcaseRub) ?? toRub(base.showcaseRubFromCardApi);
-}
-
-const CARD_FALLBACK_EVIDENCE = new Set([
-  "card_api_wallet_pair_delta",
-  "card_showcase_above_walletRub",
-]);
-
 /**
- * Единая цепочка кандидатов «цена без WB Кошелька, с СПП» (cookies / buyer / card).
- * Не используем popup «Детализация цены» — он только для валидации кошелька (см. finalizeRepricerPriceSemantics).
+ * Единая цепочка кандидатов «цена без WB Кошелька, с СПП» (DOM / buyer / orchestrator).
+ * Popup «Детализация цены» не используется как источник nonWalletRub (см. finalizeRepricerPriceSemantics).
  *
- * Карточный tier (cardApiShowcaseRub / showcaseRubFromCardApi) используется только если **строго выше**
- * walletRub (или цены кошелька из результата): раньше apiShowcaseChain брал orc.apiShowcaseRub первым и «глушил»
- * большую цену без кошелька из card API.
+ * Финальный шаг (после основных источников): если nonWalletRub всё ещё не найден,
+ * но `cardApiShowcaseRub > walletRub` — принимаем `cardApiShowcaseRub` как цену с СПП без кошелька.
  */
 export function resolveNonWalletRubDetailed(
   base: WalletParserResult,
@@ -52,20 +37,14 @@ export function resolveNonWalletRubDetailed(
   const sppDom = toRub(base.priceWithSppWithoutWalletRub);
   const bpvPw = toRub(base.buyerPriceVerification?.priceWithoutWallet);
 
-  const cardShowcaseDirect = cardApiShowcaseDirect(base);
-  const cardWalDirect = apiWalletChain(base, orc);
-
-  const walletRubRef = toRub(base.walletRub) ?? toRub(base.priceWallet) ?? wl;
-
   const candidateValues: Record<string, number | null> = {
     priceWithSppWithoutWalletRub: sppDom,
     buyerPriceVerification_priceWithoutWallet: bpvPw,
     cardApiShowcaseRub: toRub(base.cardApiShowcaseRub),
     showcaseRubFromCardApi: toRub(base.showcaseRubFromCardApi),
-    cardShowcaseDirect,
     cardApiWalletRub: toRub(base.cardApiWalletRub),
     apiWalletRub: toRub(base.apiWalletRub),
-    walletRubRef,
+    walletRub: toRub(base.walletRub),
     walletLineForCross: wl,
     verifiedLocalWithoutWalletRub: toRub(orc?.verifiedLocalWithoutWalletRub),
     parser_nonWalletRub_field: toRub(base.nonWalletRub),
@@ -75,12 +54,6 @@ export function resolveNonWalletRubDetailed(
 
   const tries: TryRow[] = [];
 
-  /**
-   * Приоритет (явный контракт):
-   * 1) priceWithSppWithoutWalletRub — DOM/orchestrator (без popup как основного источника)
-   * 2) buyerPriceVerification.priceWithoutWallet — buyer session / cookies
-   * 3) verified local / карточный tier / DOM nonWalletRub — см. порядок ниже
-   */
   if (sppDom != null) {
     tries.push({
       rub: sppDom,
@@ -106,22 +79,6 @@ export function resolveNonWalletRubDetailed(
     });
   }
 
-  if (cardShowcaseDirect != null && cardWalDirect != null && cardShowcaseDirect > cardWalDirect) {
-    tries.push({
-      rub: cardShowcaseDirect,
-      ev: "card_api_wallet_pair_delta",
-      src: "cardApiShowcaseRub/showcaseRubFromCardApi vs cardWallet",
-    });
-  }
-
-  if (walletRubRef != null && cardShowcaseDirect != null && cardShowcaseDirect > walletRubRef) {
-    tries.push({
-      rub: cardShowcaseDirect,
-      ev: "card_showcase_above_walletRub",
-      src: "cardApiShowcaseRub/showcaseRubFromCardApi > walletRub",
-    });
-  }
-
   const parsedField = toRub(base.nonWalletRub);
   if (parsedField != null) {
     tries.push({
@@ -131,25 +88,35 @@ export function resolveNonWalletRubDetailed(
     });
   }
 
-  const first = tries[0];
+  const primary = tries[0];
 
-  if (first == null) {
+  if (primary != null) {
     return {
-      nonWalletRub: null,
-      nonWalletEvidence: null,
-      nonWalletSource: null,
-      nonWalletFallbackUsed: null,
+      nonWalletRub: primary.rub,
+      nonWalletEvidence: primary.ev,
+      nonWalletSource: primary.src,
+      nonWalletFallbackUsed: false,
       nonWalletCandidateValues: candidateValues,
     };
   }
 
-  const fallbackUsed = CARD_FALLBACK_EVIDENCE.has(first.ev) ? first.ev : null;
+  const cardApi = toRub(base.cardApiShowcaseRub);
+  const walletRubOnly = toRub(base.walletRub);
+  if (cardApi != null && walletRubOnly != null && cardApi > walletRubOnly) {
+    return {
+      nonWalletRub: cardApi,
+      nonWalletEvidence: "card_api_showcase_fallback",
+      nonWalletSource: "cardApiShowcaseRub",
+      nonWalletFallbackUsed: true,
+      nonWalletCandidateValues: candidateValues,
+    };
+  }
 
   return {
-    nonWalletRub: first.rub,
-    nonWalletEvidence: first.ev,
-    nonWalletSource: first.src,
-    nonWalletFallbackUsed: fallbackUsed,
+    nonWalletRub: null,
+    nonWalletEvidence: null,
+    nonWalletSource: null,
+    nonWalletFallbackUsed: false,
     nonWalletCandidateValues: candidateValues,
   };
 }
