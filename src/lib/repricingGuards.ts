@@ -58,11 +58,11 @@ export function walletParseNumericConfidence(input: {
   if (input.popupParsed || input.priceParseSource === "popup_dom") {
     return CONF_POPUP_DOM;
   }
-  if (input.partialDom || input.parseStatus === "only_regular_found") {
-    return CONF_PARTIAL_DOM;
-  }
   if (input.parseStatus === "loaded_showcase_only") {
     return CONF_LOADED_SHOWCASE_ONLY;
+  }
+  if (input.partialDom) {
+    return CONF_PARTIAL_DOM;
   }
   if (input.parseStatus === "loaded_no_price") {
     return CONF_PARTIAL_DOM;

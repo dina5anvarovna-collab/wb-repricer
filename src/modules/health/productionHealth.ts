@@ -224,8 +224,8 @@ export async function buildProductionHealthSummary(): Promise<{
     computeRiskBucketSummary(),
     prisma.priceSnapshot.findFirst({
       where: {
-        buyerWalletPrice: { gt: 0 },
-        walletParseStatus: "wallet_found",
+        OR: [{ buyerWalletPrice: { gt: 0 } }, { showcaseRub: { gt: 0 } }],
+        walletParseStatus: { in: ["loaded_wallet_confirmed", "loaded_showcase_only"] },
       },
       orderBy: [{ parsedAt: "desc" }, { id: "desc" }],
       select: { parsedAt: true },

@@ -147,6 +147,8 @@ export function resolveObservedBuyerPrices(input: {
   const { dom, stockLevel, fallbackContext } = input;
   const verification = finalizeVerificationFromDom(dom, fallbackContext.sellerPrice);
 
+  const parserShowcase = toRub(dom.showcaseRub);
+  const parserNonWallet = toRub(dom.nonWalletRub);
   const showcaseEff = toRub(dom.showcaseRubEffective);
   const showcasePriceRub = toRub(dom.showcasePriceRub);
   const cookieShowcase = toRub(dom.showcaseRubFromCookies);
@@ -189,7 +191,15 @@ export function resolveObservedBuyerPrices(input: {
    * чтобы не терять фактическую витрину в таблице. Но для репрайса используется
    * только verified dom_wallet + подтверждённый регион (см. repricingAllowed ниже).
    */
-  let buyerWallet: number | null = domWalletVerifiedRub ?? domWalletObserved;
+  let buyerWallet: number | null = domWalletVerifiedRub ?? parserShowcase ?? domWalletObserved;
+  if (
+    buyerWallet == null &&
+    parseStatusRaw === "loaded_showcase_only" &&
+    showcaseEff != null &&
+    showcaseEff > 0
+  ) {
+    buyerWallet = showcaseEff;
+  }
   let walletSource =
     domWalletVerifiedRub != null
       ? "product_page_wallet_selector"
@@ -202,9 +212,7 @@ export function resolveObservedBuyerPrices(input: {
       : domWalletObserved != null
         ? "fallback"
         : "unverified";
-  const topPriceFound =
-    buyerWallet != null ||
-    (parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0);
+  const topPriceFound = buyerWallet != null;
 
   /**
    * Новая модель:
@@ -255,16 +263,17 @@ export function resolveObservedBuyerPrices(input: {
     fallbackChain: [],
   };
 
-  /** Колонки снимка: wallet только из DOM wallet selector, СПП только формула. */
-  let showcaseRub = buyerWallet;
+  /** Витринная цена: приоритет поля парсера, иначе эвристика loaded_showcase_only. */
+  let showcaseRub = parserShowcase ?? buyerWallet;
   if (
     parseStatusRaw === "loaded_showcase_only" &&
     showcaseEff != null &&
-    showcaseEff > 0
+    showcaseEff > 0 &&
+    parserShowcase == null
   ) {
     showcaseRub = showcaseEff;
   }
-  let priceWithoutWalletRub = buyerRegular;
+  let priceWithoutWalletRub = parserNonWallet ?? buyerRegular;
   let walletDiscountRub =
     showcaseRub != null && priceWithoutWalletRub != null
       ? Math.max(0, Math.round(priceWithoutWalletRub - showcaseRub))
@@ -280,7 +289,8 @@ export function resolveObservedBuyerPrices(input: {
   const hasUsablePrice =
     (buyerWallet != null && Number.isFinite(buyerWallet) && buyerWallet > 0) ||
     (buyerRegular != null && Number.isFinite(buyerRegular) && buyerRegular > 0) ||
-    (parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0);
+    (parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0) ||
+    (parserShowcase != null && parserShowcase > 0);
 
   const blockedBySafetyRule: string[] = [];
   let invalid = false;
@@ -338,7 +348,10 @@ export function resolveObservedBuyerPrices(input: {
   }
   if (
     (buyerWallet == null || buyerWallet <= 0) &&
-    !(parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0)
+    !(
+      (parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0) ||
+      (parserShowcase != null && parserShowcase > 0)
+    )
   ) {
     blockedBySafetyRule.push("invalid_wallet_price");
     walletInvalid = true;
@@ -408,13 +421,14 @@ export function resolveObservedBuyerPrices(input: {
           : "LOW";
   sourceConfidence = confidence === "HIGH" ? "high" : confidence === "MEDIUM" ? "medium" : "low";
   const strongWalletSignal =
-    verification.verificationStatus === "VERIFIED" &&
-    verification.verificationMethod === "dom_wallet" &&
-    verification.trustedSource === "product_page_wallet_selector" &&
-    dom.parseStatus === "wallet_found" &&
     topPriceFound === true &&
     showcaseRub != null &&
-    showcaseRub > 0;
+    showcaseRub > 0 &&
+    (dom.walletConfirmed === true && toRub(dom.walletRub) != null
+      ? true
+      : verification.verificationStatus === "VERIFIED" &&
+        verification.verificationMethod === "dom_wallet" &&
+        verification.trustedSource === "product_page_wallet_selector");
   const repricingAllowed =
     strongWalletSignal &&
     (expectedDest == null ? true : regionConfirmedComposite) &&

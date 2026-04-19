@@ -64,7 +64,7 @@ model WbProduct {
   /** Последняя «цена с СПП без кошелька», если отличалась от кошелька */
   lastRegularObservedRub     Float?
   lastParseConfidence        Float?
-  /** wallet_found | only_regular_found | parse_failed | auth_required | blocked_or_captcha | unavailable */
+  /** loaded_showcase_only | loaded_wallet_confirmed | loaded_no_price | parse_failed | auth_required | blocked_or_captcha | unavailable */
   lastWalletParseStatus      String?
   /** ok | below_min | no_target | parse_failed | auth_problem | skipped | needs_review */
   lastEvaluationStatus       String?
@@ -236,10 +236,20 @@ model PriceSnapshot {
   productId          String
   nmId               Int
   sellerPrice        Float?
+  /** Зачёркнутая / большая справочная цена на карточке */
+  priceRegular       Float?
+  /** Основная витринная цена (первым видит покупатель) — дублирует смысл buyerWalletPrice для явных выгрузок */
+  showcaseRub        Float?
+  /** Подтверждённая цена WB Кошелька (только при доказательстве) */
+  walletRub          Float?
+  /** Покупатель: цена с СПП без WB Кошелька (cookies / buyer) — дублирует buyerRegularPrice */
+  nonWalletRub       Float?
   /** Покупатель: цена с СПП без WB Кошелька (модалка / DOM regular, не дубль итога витрины) */
   buyerRegularPrice  Float?
-  /** Покупатель: WB Кошелёк; при отсутствии строки в DOM может совпадать с итогом витрины по правилам монитора */
+  /** Покупатель: основная витринная цена на карточке (наследие имени колонки = showcase) */
   buyerWalletPrice   Float?
+  walletConfirmed    Boolean  @default(false)
+  walletEvidence     String?
   /** Оценка цены со скидкой продавца на момент снимка (из кабинета) */
   sellerDiscountedSnapshotRub Float?
   walletSource       String   @default("unavailable") // dom | unavailable

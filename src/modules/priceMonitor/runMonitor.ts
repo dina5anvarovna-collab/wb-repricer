@@ -79,8 +79,7 @@ function walletStepNeedsRecovery(sl: StockLevel, dom: BuyerDomResult): boolean {
   }
   if (
     sl === "IN_STOCK" &&
-    ps !== "wallet_found" &&
-    ps !== "only_regular_found" &&
+    ps !== "loaded_wallet_confirmed" &&
     ps !== "loaded_showcase_only"
   ) {
     return true;
@@ -144,7 +143,7 @@ function deriveEvaluationStatus(input: {
     return "below_min";
   }
   if (
-    (input.parseStatus === "only_regular_found" || input.parseStatus === "loaded_showcase_only") &&
+    input.parseStatus === "loaded_showcase_only" &&
     input.buyerRegular != null &&
     input.buyerRegular > 0 &&
     input.buyerRegular < t - tol
@@ -360,10 +359,9 @@ export async function runPriceMonitorJob(opts: {
       const popupParsed =
         tier === "popup_dom" || ((dom as any).popupOpened === true && tier !== "popup_dom");
       const walletMarkerDetected =
-        parseStatus === "wallet_found" ||
+        parseStatus === "loaded_wallet_confirmed" ||
         (tier === "public_dom" &&
           parseStatus !== "parse_failed" &&
-          parseStatus !== "only_regular_found" &&
           parseStatus !== "loaded_showcase_only");
 
       const lastGoodMode = lastGoodSubstitutionMode(p.walletRubLastGoodAt ?? null);
@@ -406,7 +404,7 @@ export async function runPriceMonitorJob(opts: {
       const priceWithoutWalletRub = resolved.priceWithoutWalletRub;
 
       const partialDom =
-        parseStatus === "only_regular_found" ||
+        parseStatus === "loaded_showcase_only" ||
         (!parseRecovered && dom.success && !usedLastGoodFallback);
 
       let walletNumericConfidence = walletParseNumericConfidence({
@@ -489,9 +487,7 @@ export async function runPriceMonitorJob(opts: {
 
       const sessionDomTick =
         dom.success &&
-        (parseStatus === "wallet_found" ||
-          parseStatus === "only_regular_found" ||
-          parseStatus === "loaded_showcase_only");
+        (parseStatus === "loaded_wallet_confirmed" || parseStatus === "loaded_showcase_only");
       const oosRecoverTick = stockLevel === "OUT_OF_STOCK" && hasUsablePrice && !hardAuth;
       if (sessionDomTick || oosRecoverTick) {
         domSuccessForSession = true;
@@ -519,10 +515,7 @@ export async function runPriceMonitorJob(opts: {
           ? "buyer_unverified"
           : evaluationBase;
 
-      if (
-        parseRecovered &&
-        (parseStatus === "only_regular_found" || parseStatus === "loaded_showcase_only")
-      ) {
+      if (parseRecovered && parseStatus === "loaded_showcase_only") {
         evaluationStatus = "partial";
       }
       if (usedLastGoodFallback) {
@@ -623,15 +616,30 @@ export async function runPriceMonitorJob(opts: {
         walletNumericConfidence,
         lastGoodSubstitutionMode: lastGoodMode,
         protectOnlyLastGood,
+        walletConfirmed: dom.walletConfirmed === true,
+        walletEvidence: dom.walletEvidence ?? null,
+        parserWalletRub: dom.walletRub ?? null,
+        parserNonWalletRub: dom.nonWalletRub ?? null,
       });
+
+      const confirmedWalletRub =
+        dom.walletConfirmed === true && dom.walletRub != null && Number.isFinite(dom.walletRub) && dom.walletRub > 0
+          ? Math.round(dom.walletRub)
+          : null;
 
       await prisma.priceSnapshot.create({
         data: {
           productId: p.id,
           nmId: p.nmId,
           sellerPrice: p.sellerPrice,
+          priceRegular: dom.priceRegular ?? null,
+          showcaseRub,
+          walletRub: confirmedWalletRub,
+          nonWalletRub: priceWithoutWalletRub,
           buyerRegularPrice: priceWithoutWalletRub,
           buyerWalletPrice: showcaseRub,
+          walletConfirmed: dom.walletConfirmed === true,
+          walletEvidence: dom.walletEvidence ?? null,
           sellerDiscountedSnapshotRub: p.discountedPriceRub,
           walletSource: snapshotWalletSource,
           fixedTargetPrice: targetRub,
@@ -678,7 +686,7 @@ export async function runPriceMonitorJob(opts: {
               ? {
                   lastWalletObservedRub: showcaseRub,
                   lastKnownShowcaseRub: Math.round(showcaseRub),
-                  lastKnownWalletRub: Math.round(showcaseRub),
+                  lastKnownWalletRub: confirmedWalletRub ?? null,
                   lastPriceSeenAt: new Date(),
                   lastPriceSource: buyerRegularSource,
                   walletRubLastGood: Math.round(showcaseRub),
@@ -696,7 +704,7 @@ export async function runPriceMonitorJob(opts: {
               ? {
                   lastWalletObservedRub: showcaseRub,
                   lastKnownShowcaseRub: Math.round(showcaseRub),
-                  lastKnownWalletRub: Math.round(showcaseRub),
+                  lastKnownWalletRub: null,
                   lastPriceSeenAt: new Date(),
                   lastPriceSource: "last_good",
                   safeModeHold: true,
@@ -905,7 +913,6 @@ export async function runPriceMonitorJob(opts: {
                 lastWalletObservedRub: trusted.aggregatedShowcaseWithWalletRub,
                 lastRegularObservedRub: trusted.aggregatedPriceWithSppRub,
                 lastKnownShowcaseRub: trusted.aggregatedShowcaseWithWalletRub,
-                lastKnownWalletRub: trusted.aggregatedShowcaseWithWalletRub,
                 lastPriceSeenAt: new Date(),
                 lastPriceSource: trusted.verificationSource ?? "trusted_aggregate",
               }

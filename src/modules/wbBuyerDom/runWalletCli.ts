@@ -7,6 +7,7 @@ import { logger } from "../../lib/logger.js";
 import { runtimePaths } from "../../lib/runtimePaths.js";
 import type {
   BrowserKind,
+  WalletEvidenceKind,
   WalletParserResult,
   WalletParseStatus,
 } from "../../walletDom/wbWalletPriceParser.js";
@@ -24,6 +25,14 @@ export type BuyerDomResult = {
   url: string;
   region: string | null;
   priceRegular: number | null;
+  /** Основная витринная цена на карточке (первая для покупателя). */
+  showcaseRub?: number | null;
+  /** Подтверждённая цена WB Кошелька — только если есть доказательство в парсере. */
+  walletRub?: number | null;
+  /** Цена без кошелька, с СПП (cookies / orchestrator). */
+  nonWalletRub?: number | null;
+  walletConfirmed?: boolean | null;
+  walletEvidence?: WalletEvidenceKind | null;
   priceDiscounted: number | null;
   priceWallet: number | null;
   walletLabel: string | null;
@@ -89,8 +98,7 @@ export type BuyerDomResult = {
 
 function isWalletParseStatus(s: string): s is WalletParseStatus {
   return (
-    s === "wallet_found" ||
-    s === "only_regular_found" ||
+    s === "loaded_wallet_confirmed" ||
     s === "loaded_showcase_only" ||
     s === "loaded_no_price" ||
     s === "parse_failed" ||
@@ -174,6 +182,15 @@ function walletResultFromCliJson(
   const showcaseResolvedSource =
     src === "product_page_dom" || src === "card_api" || src === "none" ? src : undefined;
 
+  const wEv = j.walletEvidence;
+  const walletEvidence: WalletEvidenceKind | undefined =
+    wEv === "buyer_session" ||
+    wEv === "wallet_label" ||
+    wEv === "wallet_marker" ||
+    wEv === "showcase_less_than_nonwallet"
+      ? wEv
+      : undefined;
+
   return {
     nmId: typeof j.nmId === "number" ? j.nmId : defaults.nmId,
     url:
@@ -182,6 +199,11 @@ function walletResultFromCliJson(
         : `https://www.wildberries.ru/catalog/${defaults.nmId}/detail.aspx`,
     region: typeof j.region === "string" ? j.region : defaults.region,
     priceRegular: typeof j.priceRegular === "number" ? j.priceRegular : null,
+    showcaseRub: typeof j.showcaseRub === "number" ? j.showcaseRub : undefined,
+    walletRub: typeof j.walletRub === "number" ? j.walletRub : undefined,
+    nonWalletRub: typeof j.nonWalletRub === "number" ? j.nonWalletRub : undefined,
+    walletConfirmed: j.walletConfirmed === true ? true : j.walletConfirmed === false ? false : undefined,
+    walletEvidence,
     discountedPrice: typeof j.discountedPrice === "number" ? j.discountedPrice : null,
     priceWallet: typeof j.priceWallet === "number" ? j.priceWallet : null,
     walletLabel: typeof j.walletLabel === "string" ? j.walletLabel : null,
@@ -309,6 +331,11 @@ export function walletParserResultToBuyerDom(r: WalletParserResult): BuyerDomRes
     url: r.url,
     region: r.region,
     priceRegular: r.priceRegular,
+    showcaseRub: r.showcaseRub ?? r.showcaseRubEffective ?? null,
+    walletRub: r.walletRub ?? null,
+    nonWalletRub: r.nonWalletRub ?? r.priceWithSppWithoutWalletRub ?? null,
+    walletConfirmed: typeof r.walletConfirmed === "boolean" ? r.walletConfirmed : null,
+    walletEvidence: r.walletEvidence ?? null,
     priceDiscounted: r.discountedPrice,
     priceWallet: r.priceWallet,
     walletLabel: r.walletLabel,

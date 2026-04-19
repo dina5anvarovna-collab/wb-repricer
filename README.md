@@ -132,7 +132,7 @@ sudo systemctl restart wb-repricer
 
 - Новый фронт: `apps/web` (Vite + React + Tailwind + TanStack Table/Query + Zustand). Старый `public/admin.html` больше не основной интерфейс.
 - Синк каталога подмешивает **Content API** (название, бренд, предмет, артикул).
-- DOM-парсер кошелька: **статусы** (`wallet_found`, `only_regular_found`, …), **confidence**, JSON-LD; реальная выгрузка в кабинет только при достаточной уверенности (`REPRICER_MIN_WALLET_PARSE_CONFIDENCE`).
+- DOM-парсер кошелька: **статусы** (`loaded_showcase_only`, `loaded_wallet_confirmed`, `loaded_no_price`, `parse_failed`, …), **confidence**, JSON-LD; реальная выгрузка в кабинет только при достаточной уверенности (`REPRICER_MIN_WALLET_PARSE_CONFIDENCE`).
 - Опционально: `REPRICER_ADMIN_PASSWORD` + `POST /api/auth/login` → `Authorization: Bearer …` для остальных `/api/*` (кроме сохранения токена продавца).
 - План по файлам и риски: [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md).
 

@@ -121,8 +121,8 @@ export function buildBuyerRegionalSnapshotFromPriceSnapshot(s: PriceSnapshot): B
   return {
     nmId: s.nmId,
     dest: s.regionDest?.trim() || null,
-    showcaseWithWalletRub: toRub(s.buyerWalletPrice),
-    priceWithSppRub: toRub(s.buyerRegularPrice),
+    showcaseWithWalletRub: toRub(s.showcaseRub ?? s.buyerWalletPrice),
+    priceWithSppRub: toRub(s.nonWalletRub ?? s.buyerRegularPrice),
     sppRub:
       toRub(
         typeof dj.sppRub === "number" && Number.isFinite(dj.sppRub)

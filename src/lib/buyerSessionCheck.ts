@@ -179,8 +179,7 @@ export async function checkBuyerSession(
     });
 
     if (
-      probe.parseStatus === "wallet_found" ||
-      probe.parseStatus === "only_regular_found" ||
+      probe.parseStatus === "loaded_wallet_confirmed" ||
       probe.parseStatus === "loaded_showcase_only"
     ) {
       logger.info(

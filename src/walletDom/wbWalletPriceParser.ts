@@ -27,6 +27,7 @@ import {
 import {
   fetchShowcaseRubViaPageEvaluate,
   resolveShowcaseForMonitorStep,
+  type ShowcaseOrchestratorResult,
 } from "./priceSourceResolver.js";
 import {
   computeBuyerPriceVerification,
@@ -431,10 +432,21 @@ export type WalletParserInput = {
   fetchShowcaseWithCookies?: boolean;
 };
 
+/** Доказательства WB Кошелька (не «уменьшая цена» сама по себе). */
+export type WalletEvidenceKind =
+  | "buyer_session"
+  | "wallet_label"
+  | "wallet_marker"
+  | "showcase_less_than_nonwallet"
+  | null;
+
+/**
+ * Статусы repricer: витрина / подтверждённый кошелёк / нет цены / сбой.
+ * `auth_required` — стена входа buyer-профиля (редирект на passport).
+ */
 export type WalletParseStatus =
-  | "wallet_found"
-  | "only_regular_found"
   | "loaded_showcase_only"
+  | "loaded_wallet_confirmed"
   | "loaded_no_price"
   | "parse_failed"
   | "auth_required"
@@ -447,10 +459,20 @@ export type WalletParserResult = {
   nmId: number;
   url: string;
   region: string | null;
+  /** Зачёркнутая / большая справочная цена на карточке. */
   priceRegular: number | null;
   /** Цена со скидкой продавца на витрине (если отличима от кошелька) */
   discountedPrice: number | null;
+  /** @deprecated см. walletRub — подтверждённая цена WB Кошелька */
   priceWallet: number | null;
+  /** Основная витринная цена (то, что покупатель видит первым; почти всегда сценарий с Кошельком). */
+  showcaseRub?: number | null;
+  /** Подтверждённая цена WB Кошелька — только при явном доказательстве или правиле nonWallet. */
+  walletRub?: number | null;
+  /** Цена без WB Кошелька, но с СПП (cookies / buyer / card сравнение). */
+  nonWalletRub?: number | null;
+  walletConfirmed?: boolean;
+  walletEvidence?: WalletEvidenceKind;
   /** Отладочные строки, собранные из DOM (могут отсутствовать). */
   lines?: string[];
   walletLabel: string | null;
@@ -742,11 +764,18 @@ function buildWalletResult(input: {
     dom.walletDomHint === "red_left_spp_pair" &&
     Boolean(dom.walletLine?.includes("красная цена слева"));
 
-  const hasWalletSignal = walletCandidate != null;
+  let walletEvidence: WalletEvidenceKind = null;
+  if (walletFromTextLine != null) {
+    walletEvidence = "wallet_label";
+  } else if (walletFromClass != null || walletFromIcon != null || walletFromRedLeftLayout) {
+    walletEvidence = "wallet_marker";
+  }
+
+  const hasWalletMarkerSignal = walletCandidate != null && walletEvidence != null;
   const hasRegular = dom.regularPrice != null && dom.regularPrice > 0;
 
-  if (hasWalletSignal) {
-    parseStatus = "wallet_found";
+  if (hasWalletMarkerSignal) {
+    parseStatus = "loaded_wallet_confirmed";
     if (walletFromRedLeftLayout) {
       parseMethod = "wallet_red_left_spp_pair";
       sourceConfidence = 0.72;
@@ -782,19 +811,19 @@ function buildWalletResult(input: {
       parseMethod = "two_tier_showcase_dom+json_ld_regular";
     }
   } else if (hasRegular) {
-    parseStatus = "only_regular_found";
-    parseMethod = "text_scan_regular";
+    parseStatus = "loaded_showcase_only";
+    parseMethod = "text_scan_showcase_single_tier";
     sourceConfidence = 0.55;
     if (jsonRef != null && Math.abs(jsonRef - dom.regularPrice!) / jsonRef < 0.04) {
       sourceConfidence = Math.min(0.72, sourceConfidence + 0.1);
       parseMethod = "text_scan+json_ld";
     }
   } else if (jsonRef != null) {
-    parseStatus = "only_regular_found";
-    parseMethod = "json_ld_fallback";
+    parseStatus = "loaded_showcase_only";
+    parseMethod = "json_ld_fallback_showcase";
     sourceConfidence = 0.42;
   } else if (
-    !hasWalletSignal &&
+    !hasWalletMarkerSignal &&
     !hasDistinctPair &&
     !hasRegular &&
     jsonRef == null &&
@@ -806,40 +835,47 @@ function buildWalletResult(input: {
     sourceConfidence = 0.38;
   }
 
-  const priceRegular =
+  const priceRegularResolved =
     dom.regularPrice ?? (jsonRef != null && !hasRegular ? jsonRef : null);
 
-  let priceWalletResolved: number | null = parseStatus === "wallet_found" ? walletCandidate : null;
+  let walletRubResolved: number | null =
+    parseStatus === "loaded_wallet_confirmed" && walletCandidate != null ? walletCandidate : null;
+
   if (
-    priceWalletResolved != null &&
+    walletRubResolved != null &&
     walletFromClass == null &&
-    priceRegular != null &&
-    Number.isFinite(priceRegular) &&
-    priceRegular > 0 &&
-    priceWalletResolved > priceRegular * 1.25
+    priceRegularResolved != null &&
+    Number.isFinite(priceRegularResolved) &&
+    priceRegularResolved > 0 &&
+    walletRubResolved > priceRegularResolved * 1.25
   ) {
-    priceWalletResolved = null;
-    if (parseStatus === "wallet_found") {
-      parseStatus = hasDistinctPair ? "loaded_showcase_only" : "only_regular_found";
+    walletRubResolved = null;
+    walletEvidence = null;
+    if (parseStatus === "loaded_wallet_confirmed") {
+      parseStatus = "loaded_showcase_only";
       sourceConfidence = Math.min(sourceConfidence, 0.58);
       parseMethod = `${parseMethod};wallet_rejected_gt_regular`;
     }
   }
 
-  let showcaseRubEffectiveOut: number | null = null;
-  if (parseStatus === "loaded_showcase_only" && pairLow != null && pairHigh != null) {
-    showcaseRubEffectiveOut = pairLow;
-  } else if (parseStatus === "wallet_found" && walletCandidate != null) {
-    showcaseRubEffectiveOut =
-      hasDistinctPair && pairLow != null ? pairLow : walletCandidate;
-  } else if (parseStatus === "only_regular_found" && priceRegular != null) {
-    showcaseRubEffectiveOut = priceRegular;
+  let showcaseRubNum: number | null = null;
+  if (hasDistinctPair && pairLow != null) {
+    showcaseRubNum = pairLow;
+  } else if (parseStatus === "loaded_wallet_confirmed" && walletCandidate != null) {
+    showcaseRubNum = walletCandidate;
+  } else if (parseStatus === "loaded_showcase_only" && priceRegularResolved != null) {
+    showcaseRubNum = priceRegularResolved;
+  }
+  if (showcaseRubNum == null && jsonRef != null && parseStatus !== "loaded_no_price") {
+    showcaseRubNum = Math.round(jsonRef);
   }
 
+  const walletConfirmedDom = walletRubResolved != null;
+
   const discountedPrice =
-    priceWalletResolved != null &&
+    walletRubResolved != null &&
     dom.regularPrice != null &&
-    dom.regularPrice > priceWalletResolved
+    dom.regularPrice > walletRubResolved
       ? dom.regularPrice
       : null;
 
@@ -847,18 +883,93 @@ function buildWalletResult(input: {
     nmId,
     url,
     region,
-    priceRegular,
+    priceRegular: priceRegularResolved,
     discountedPrice,
-    priceWallet: priceWalletResolved,
-    walletLabel: priceWalletResolved != null ? dom.walletLabel : null,
-    walletDiscountText: priceWalletResolved != null ? dom.walletDiscountText : null,
+    priceWallet: walletConfirmedDom ? walletRubResolved : null,
+    showcaseRub: showcaseRubNum,
+    walletRub: walletConfirmedDom ? walletRubResolved : null,
+    nonWalletRub: null,
+    walletConfirmed: walletConfirmedDom,
+    walletEvidence: walletConfirmedDom ? walletEvidence : null,
+    walletLabel: walletRubResolved != null ? dom.walletLabel : null,
+    walletDiscountText: walletRubResolved != null ? dom.walletDiscountText : null,
     inStock: dom.inStock,
     parsedAt: new Date().toISOString(),
     source: "dom",
     parseStatus,
     sourceConfidence,
     parseMethod,
-    showcaseRubEffective: showcaseRubEffectiveOut,
+    showcaseRubEffective: showcaseRubNum,
+  };
+}
+
+function finalizeRepricerPriceSemantics(
+  base: WalletParserResult,
+  orc: ShowcaseOrchestratorResult | null,
+): WalletParserResult {
+  const toRub = (v: unknown): number | null => {
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return null;
+    return Math.round(v);
+  };
+
+  const showcaseRub =
+    toRub(base.showcaseRub ?? base.showcaseRubEffective) ??
+    toRub(orc?.effectiveShowcaseRub) ??
+    toRub(base.showcasePriceRub) ??
+    null;
+
+  const nonWalletRub =
+    toRub(orc?.verifiedLocalWithoutWalletRub) ??
+    toRub(orc?.apiShowcaseRub) ??
+    toRub(base.nonWalletRub) ??
+    null;
+
+  let walletRub = toRub(base.walletRub ?? base.priceWallet);
+  let walletConfirmed = Boolean(base.walletConfirmed);
+  let walletEvidence = base.walletEvidence ?? null;
+  let parseStatus = base.parseStatus;
+
+  const ver = base.buyerPriceVerification;
+  if (
+    ver?.verificationStatus === "VERIFIED" &&
+    ver.trustedSource === "product_page_wallet_selector" &&
+    toRub(ver.walletPriceVerified) != null
+  ) {
+    walletRub = toRub(ver.walletPriceVerified);
+    walletConfirmed = true;
+    walletEvidence = "buyer_session";
+    if (!["parse_failed", "blocked_or_captcha", "auth_required", "loaded_no_price"].includes(parseStatus)) {
+      parseStatus = "loaded_wallet_confirmed";
+    }
+  }
+
+  if (showcaseRub != null && nonWalletRub != null && showcaseRub < nonWalletRub) {
+    walletRub = showcaseRub;
+    walletConfirmed = true;
+    walletEvidence = "showcase_less_than_nonwallet";
+    if (!["parse_failed", "blocked_or_captcha", "auth_required", "loaded_no_price"].includes(parseStatus)) {
+      parseStatus = "loaded_wallet_confirmed";
+    }
+  }
+
+  if (
+    !walletConfirmed &&
+    showcaseRub != null &&
+    !["parse_failed", "blocked_or_captcha", "auth_required", "loaded_no_price"].includes(parseStatus)
+  ) {
+    parseStatus = "loaded_showcase_only";
+  }
+
+  return {
+    ...base,
+    showcaseRub,
+    showcaseRubEffective: showcaseRub,
+    nonWalletRub,
+    walletRub: walletConfirmed ? walletRub : null,
+    walletConfirmed,
+    walletEvidence,
+    parseStatus,
+    priceWallet: walletConfirmed ? walletRub : null,
   };
 }
 
@@ -2380,8 +2491,7 @@ async function scrapeWalletPriceOnPage(
     }
 
     const okDom =
-      out.parseStatus === "wallet_found" ||
-      out.parseStatus === "only_regular_found" ||
+      out.parseStatus === "loaded_wallet_confirmed" ||
       out.parseStatus === "loaded_showcase_only" ||
       out.parseStatus === "loaded_no_price" ||
       (out.priceRegular != null && out.priceRegular > 0);
@@ -2582,13 +2692,13 @@ export function inferWalletPriceParseSource(input: {
   const f = input.final;
 
   const domWalletOk =
-    p.parseStatus === "wallet_found" ||
+    p.parseStatus === "loaded_wallet_confirmed" ||
     p.parseStatus === "loaded_showcase_only" ||
     Number(p.walletPriceRubAcceptedFromDom ?? p.showcaseWalletPriceCandidate ?? 0) > 0;
 
   const domRegularOk =
-    p.parseStatus === "only_regular_found" ||
     p.parseStatus === "loaded_showcase_only" ||
+    p.parseStatus === "loaded_wallet_confirmed" ||
     (p.priceRegular != null && Number.isFinite(p.priceRegular) && p.priceRegular > 0);
 
   const popupFixedWallet =
@@ -2596,7 +2706,7 @@ export function inferWalletPriceParseSource(input: {
     popupWalletRub != null &&
     popupWalletRub > 0 &&
     !domWalletOk &&
-    (p.parseStatus === "parse_failed" || p.parseStatus === "only_regular_found");
+    (p.parseStatus === "parse_failed" || p.parseStatus === "loaded_showcase_only");
 
   if (popupFixedWallet) {
     return "popup_dom";
@@ -2737,7 +2847,7 @@ async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<Walle
         maxCardAttempts: env.REPRICER_MONITOR_CARD_API_MAX_ATTEMPTS,
         stockLevel,
       });
-      const merged = {
+      const mergedRaw = {
         ...dom,
         showcaseRubEffective: orc.effectiveShowcaseRub,
         showcaseResolvedSource: orc.source,
@@ -2754,6 +2864,7 @@ async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<Walle
         showcaseRubFromCookies: orc.apiShowcaseRub,
         showcaseQueryDest: orc.destEffective,
       };
+      const merged = finalizeRepricerPriceSemantics(mergedRaw, orc);
       const priceParseSource = inferWalletPriceParseSource({
         plainAfterScrape: dom,
         popup: { popupOpened: false, walletRub: null, withoutWalletRub: null },
@@ -2761,12 +2872,13 @@ async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<Walle
       });
       return { ...merged, priceParseSource };
     }
+    const finalizedDom = finalizeRepricerPriceSemantics(dom, null);
     const priceParseSource = inferWalletPriceParseSource({
       plainAfterScrape: dom,
       popup: { popupOpened: false, walletRub: null, withoutWalletRub: null },
-      final: dom,
+      final: finalizedDom,
     });
-    return { ...dom, priceParseSource };
+    return { ...finalizedDom, priceParseSource };
   } finally {
     await context.close();
   }
@@ -2944,7 +3056,7 @@ async function getWbWalletPriceBatchUnlocked(
           dom.verificationStatus === "VERIFIED" &&
           dom.verificationMethod === "dom_wallet" &&
           dom.buyerPriceVerification?.trustedSource === "product_page_wallet_selector" &&
-          dom.parseStatus === "wallet_found" &&
+          dom.parseStatus === "loaded_wallet_confirmed" &&
           (dom.walletPriceRubAcceptedFromDom ?? dom.showcaseWalletPriceCandidate ?? null) != null;
         const firstWalletRead =
           dom.popupWalletRub ??
@@ -3032,9 +3144,10 @@ async function getWbWalletPriceBatchUnlocked(
         };
 
         let mergedResult: WalletParserResult;
+        let orcBatch: ShowcaseOrchestratorResult | null = null;
         if (runShowcaseOrchestrator) {
           const stockLevel = resolveStockLevel(step.cabinetStock, dom.inStock);
-          const orc = await resolveRegionalShowcasePrice({
+          orcBatch = await resolveRegionalShowcasePrice({
             walletDom: domWithRegionSignals,
             page,
             nmId: step.nmId,
@@ -3045,24 +3158,25 @@ async function getWbWalletPriceBatchUnlocked(
           });
           mergedResult = {
             ...domWithRegionSignals,
-            showcaseRubEffective: orc.effectiveShowcaseRub,
-            showcaseResolvedSource: orc.source,
-            showcasePriceRub: orc.showcasePriceRub,
-            priceWithSppWithoutWalletRub: orc.priceWithSppWithoutWalletRub,
-            verificationSource: orc.verificationSource,
-            sourcePriority: orc.sourcePriority,
-            sourceConflictDetected: orc.sourceConflictDetected,
-            sourceConflictDeltaRub: orc.sourceConflictDeltaRub,
-            conflictAcceptedSource: orc.conflictAcceptedSource,
-            showcaseApiRub: orc.apiShowcaseRub,
-            apiWalletRub: orc.apiWalletRub,
-            showcaseResolutionNote: orc.resolutionNote,
-            showcaseRubFromCookies: orc.apiShowcaseRub,
-            showcaseQueryDest: orc.destEffective,
+            showcaseRubEffective: orcBatch.effectiveShowcaseRub,
+            showcaseResolvedSource: orcBatch.source,
+            showcasePriceRub: orcBatch.showcasePriceRub,
+            priceWithSppWithoutWalletRub: orcBatch.priceWithSppWithoutWalletRub,
+            verificationSource: orcBatch.verificationSource,
+            sourcePriority: orcBatch.sourcePriority,
+            sourceConflictDetected: orcBatch.sourceConflictDetected,
+            sourceConflictDeltaRub: orcBatch.sourceConflictDeltaRub,
+            conflictAcceptedSource: orcBatch.conflictAcceptedSource,
+            showcaseApiRub: orcBatch.apiShowcaseRub,
+            apiWalletRub: orcBatch.apiWalletRub,
+            showcaseResolutionNote: orcBatch.resolutionNote,
+            showcaseRubFromCookies: orcBatch.apiShowcaseRub,
+            showcaseQueryDest: orcBatch.destEffective,
           };
         } else {
           mergedResult = domWithRegionSignals;
         }
+        mergedResult = finalizeRepricerPriceSemantics(mergedResult, orcBatch);
         const priceParseSource = inferWalletPriceParseSource({
           plainAfterScrape: dom,
           popup,
