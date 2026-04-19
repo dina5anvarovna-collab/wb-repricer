@@ -74,6 +74,7 @@ import {
   recordBrowserParseProbe,
 } from "../lib/browserParseProbeState.js";
 import { checkBuyerSession } from "../lib/buyerSessionCheck.js";
+import { normalizeParseProbePriceFields } from "../lib/parseProbeApiNormalization.js";
 import { resolveWbBrowserHeadless } from "../lib/wbBrowserEnv.js";
 import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
 import {
@@ -485,18 +486,14 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         debugArtifactPaths: result.debugArtifactPaths ?? [],
       });
       logger.info({ nmId, tag: "parse-probe-browser", ok: okParse }, "browser wallet probe done");
+      const norm = normalizeParseProbePriceFields(result);
       return {
         ok: okParse,
         parseStatus: result.parseStatus,
         blockReason: result.blockReason ?? null,
         priceParseSource: result.priceParseSource ?? null,
         nmId: result.nmId,
-        priceRegular: result.priceRegular ?? null,
-        showcaseRub: result.showcaseRub ?? result.showcaseRubEffective ?? null,
-        walletRub: result.walletRub ?? null,
-        nonWalletRub: result.nonWalletRub ?? result.priceWithSppWithoutWalletRub ?? null,
-        walletConfirmed: result.walletConfirmed ?? false,
-        walletEvidence: result.walletEvidence ?? null,
+        ...norm,
         showcaseRubEffective: result.showcaseRubEffective ?? null,
         walletHint: result.priceWallet,
         browserUrlAfterParse: result.browserUrlAfterParse ?? null,

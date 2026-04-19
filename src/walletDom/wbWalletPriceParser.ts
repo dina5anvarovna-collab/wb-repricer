@@ -438,6 +438,8 @@ export type WalletEvidenceKind =
   | "wallet_label"
   | "wallet_marker"
   | "showcase_less_than_nonwallet"
+  /** Верификация DOM: селектор кошелька / интеграция buyerPriceVerification */
+  | "dom_wallet"
   | null;
 
 /**

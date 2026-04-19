@@ -187,7 +187,8 @@ function walletResultFromCliJson(
     wEv === "buyer_session" ||
     wEv === "wallet_label" ||
     wEv === "wallet_marker" ||
-    wEv === "showcase_less_than_nonwallet"
+    wEv === "showcase_less_than_nonwallet" ||
+    wEv === "dom_wallet"
       ? wEv
       : undefined;
 
