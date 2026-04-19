@@ -483,6 +483,10 @@ export type WalletParserResult = {
   /** Диагностика: как выбрана nonWalletRub (см. nonWalletRubResolution). */
   nonWalletEvidence?: string | null;
   nonWalletSource?: string | null;
+  /** Карточный/API fallback (ev-код из nonWalletRubResolution). */
+  nonWalletFallbackUsed?: string | null;
+  /** Кандидаты для диагностики parse-probe. */
+  nonWalletCandidateValues?: Record<string, number | null>;
   walletConfirmed?: boolean;
   walletEvidence?: WalletEvidenceKind;
   /** Все сработавшие признаки (порядок = порядок обнаружения); primary — walletEvidence. */
@@ -1061,6 +1065,8 @@ function finalizeRepricerPriceSemantics(
     nonWalletRub,
     nonWalletEvidence: nwDetail.nonWalletEvidence,
     nonWalletSource: nwDetail.nonWalletSource,
+    nonWalletFallbackUsed: nwDetail.nonWalletFallbackUsed,
+    nonWalletCandidateValues: nwDetail.nonWalletCandidateValues,
     walletRub: walletConfirmed ? walletRub : null,
     walletConfirmed,
     walletEvidence,

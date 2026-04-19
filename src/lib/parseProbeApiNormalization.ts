@@ -151,6 +151,8 @@ export function normalizeParseProbePriceFields(r: WalletParserResult): ParseProb
 export function buildParseProbeDiagnostics(r: WalletParserResult) {
   return {
     nonWalletSourceUsed: r.nonWalletSource ?? null,
+    nonWalletFallbackUsed: r.nonWalletFallbackUsed ?? null,
+    nonWalletCandidateValues: r.nonWalletCandidateValues ?? {},
     walletSourceUsed: r.walletEvidence ?? null,
     priceWithSppWithoutWalletRubRaw: r.priceWithSppWithoutWalletRub ?? null,
     buyerPriceVerificationPriceWithoutWallet: r.buyerPriceVerification?.priceWithoutWallet ?? null,
