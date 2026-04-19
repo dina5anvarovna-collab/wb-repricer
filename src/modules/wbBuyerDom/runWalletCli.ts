@@ -160,7 +160,9 @@ function parseBuyerPriceVerificationFromJson(
     sourceWithoutWallet:
       o.sourceWithoutWallet === "formula"
         ? "formula"
-        : "none",
+        : o.sourceWithoutWallet === "card_api_pair"
+          ? "card_api_pair"
+          : "none",
     verificationMethod:
       o.verificationMethod === "dom_wallet" || o.verificationMethod === "unverified"
         ? o.verificationMethod

@@ -1,3 +1,7 @@
+import {
+  resolveNonWalletRubDetailed,
+  type NonWalletRubDetail,
+} from "./nonWalletRubResolution.js";
 import type {
   WalletEvidenceKind,
   WalletParserResult,
@@ -15,8 +19,21 @@ export type ParseProbeNormalizedPrices = {
   showcaseRub: number | null;
   walletRub: number | null;
   nonWalletRub: number | null;
+  nonWalletEvidence: string | null;
+  nonWalletSource: string | null;
   walletConfirmed: boolean;
+  /** Итоговый «лучший» evidence для UI (после finalize + согласованные приоритеты) */
   walletEvidence: WalletEvidenceKind;
+  verificationMethod: string | null;
+  verificationStatus: string | null;
+  verificationReason: string | null;
+  /** Сырьё для отладки: не затирает `walletEvidence`, а фиксирует уровни */
+  walletEvidenceRaw: {
+    parserWalletEvidence: WalletEvidenceKind;
+    verificationMethod: string | null;
+    verificationStatus: string | null;
+    verificationReason: string | null;
+  };
 };
 
 /**
@@ -43,10 +60,11 @@ export function normalizeParseProbePriceFields(r: WalletParserResult): ParseProb
     walletRub = toRub(r.walletRub);
   }
 
-  const nonWalletRub =
-    toRub(r.priceWithSppWithoutWalletRub) ??
-    toRub(bpv?.priceWithoutWallet) ??
-    toRub(r.nonWalletRub);
+  const walletLine = toRub(r.walletRub) ?? toRub(r.priceWallet) ?? showcaseRub;
+  const nwComputed: NonWalletRubDetail = resolveNonWalletRubDetailed(r, null, walletLine);
+  const nonWalletRub = r.nonWalletRub ?? nwComputed.nonWalletRub;
+  const nonWalletEvidence = r.nonWalletEvidence ?? nwComputed.nonWalletEvidence;
+  const nonWalletSource = r.nonWalletSource ?? nwComputed.nonWalletSource;
 
   const hasWalletLabel = typeof r.walletLabel === "string" && r.walletLabel.trim().length > 0;
   const domWalletMethod = r.verificationMethod === "dom_wallet";
@@ -58,37 +76,69 @@ export function normalizeParseProbePriceFields(r: WalletParserResult): ParseProb
     r.walletIconDetected === true ||
     domWalletMethod;
 
-  const precise = r.walletEvidence ?? null;
-  let walletEvidence: WalletEvidenceKind = null;
+  /** Сырой evidence с поля парсера (до API-фолбэков) */
+  const parserWalletEvidenceRaw: WalletEvidenceKind = r.walletEvidence ?? null;
+  /** Итоговый evidence: finalize + при необходимости фолбэк */
+  let walletEvidence: WalletEvidenceKind = parserWalletEvidenceRaw;
 
-  if (precise === "buyer_session" || precise === "showcase_less_than_nonwallet") {
-    walletEvidence = precise;
-  } else if (
-    r.verificationStatus === "VERIFIED" &&
-    r.verificationMethod === "dom_wallet" &&
-    toRub(r.priceWallet) != null
-  ) {
-    walletEvidence = "dom_wallet";
-  } else if (precise === "wallet_label" || precise === "wallet_marker") {
-    walletEvidence = precise;
-  } else if (domWalletMethod) {
-    walletEvidence = "dom_wallet";
-  } else if (hasWalletLabel) {
-    walletEvidence = "wallet_label";
-  } else if (r.walletIconDetected === true) {
-    walletEvidence = "wallet_marker";
-  } else if (precise === "dom_wallet") {
-    walletEvidence = "dom_wallet";
-  } else if (r.verificationStatus === "VERIFIED") {
-    walletEvidence = "dom_wallet";
+  const rawPayload = {
+    parserWalletEvidence: parserWalletEvidenceRaw,
+    verificationMethod: typeof r.verificationMethod === "string" ? r.verificationMethod : null,
+    verificationStatus: typeof r.verificationStatus === "string" ? r.verificationStatus : null,
+    verificationReason: typeof r.verificationReason === "string" ? r.verificationReason : null,
+  };
+
+  if (walletEvidence == null) {
+    if (
+      r.verificationStatus === "VERIFIED" &&
+      r.verificationMethod === "dom_wallet" &&
+      toRub(r.priceWallet) != null
+    ) {
+      walletEvidence = "dom_wallet";
+    } else if (bpv?.verificationStatus === "VERIFIED" && bpv.verificationMethod === "dom_wallet") {
+      walletEvidence = "dom_wallet";
+    } else if (domWalletMethod) {
+      walletEvidence = "dom_wallet";
+    } else if (hasWalletLabel) {
+      walletEvidence = "wallet_label";
+    } else if (r.walletIconDetected === true) {
+      walletEvidence = "wallet_marker";
+    } else if (r.verificationStatus === "VERIFIED") {
+      walletEvidence = "dom_wallet";
+    }
   }
+
+  const verificationMethod =
+    typeof r.verificationMethod === "string"
+      ? r.verificationMethod
+      : typeof bpv?.verificationMethod === "string"
+        ? bpv.verificationMethod
+        : null;
+  const verificationStatus =
+    typeof r.verificationStatus === "string"
+      ? r.verificationStatus
+      : typeof bpv?.verificationStatus === "string"
+        ? bpv.verificationStatus
+        : null;
+  const verificationReason =
+    typeof r.verificationReason === "string"
+      ? r.verificationReason
+      : typeof bpv?.verificationReason === "string"
+        ? bpv.verificationReason
+        : null;
 
   return {
     priceRegular,
     showcaseRub,
     walletRub,
     nonWalletRub,
+    nonWalletEvidence,
+    nonWalletSource,
     walletConfirmed,
     walletEvidence,
+    verificationMethod,
+    verificationStatus,
+    verificationReason,
+    walletEvidenceRaw: rawPayload,
   };
 }

@@ -13,7 +13,7 @@ export type BuyerPriceVerificationSnapshot = {
   showcaseWalletPrice: number | null;
   /** Подтвержденная цена WB Кошелька из DOM wallet selector. */
   walletPriceVerified: number | null;
-  /** Цена с СПП без кошелька, только из формулы sellerDiscountPriceRub - sppRub. */
+  /** Цена с СПП без кошелька (формула монитора или пара цен card.wb.ru). */
   priceWithoutWallet: number | null;
   walletDiscountRub: number | null;
   walletDiscount: number | null;
@@ -21,7 +21,7 @@ export type BuyerPriceVerificationSnapshot = {
   sourceSeller: "wb_seller_api" | "none";
   sourceWalletVisible: "dom_price_block" | "none";
   sourceWalletDetails: "product_page_wallet_selector" | "none";
-  sourceWithoutWallet: "formula" | "none";
+  sourceWithoutWallet: "formula" | "none" | "card_api_pair";
   verificationMethod: "dom_wallet" | "unverified";
   repricingAllowed: boolean;
   trustedSource: "product_page_wallet_selector" | "none";
@@ -66,20 +66,35 @@ export function computeBuyerPriceVerification(
   const verificationStatus: BuyerPriceVerificationStatus = verified ? "VERIFIED" : "UNVERIFIED";
   const verificationReason = domWalletVerified ? "dom_wallet_detected" : parts.length ? parts.join(";") : "unknown";
 
+  let priceWithoutWallet: number | null = null;
+  let sourceWithoutWallet: BuyerPriceVerificationSnapshot["sourceWithoutWallet"] = "none";
+  const cardCs = cardApiShowcaseRub != null && Number.isFinite(cardApiShowcaseRub) ? cardApiShowcaseRub : null;
+  const cardW = cardApiWalletRub != null && Number.isFinite(cardApiWalletRub) ? cardApiWalletRub : null;
+  if (
+    cardCs != null &&
+    cardW != null &&
+    cardCs > cardW
+  ) {
+    priceWithoutWallet = Math.round(cardCs);
+    sourceWithoutWallet = "card_api_pair";
+  } else if (domWalletVerified) {
+    sourceWithoutWallet = "formula";
+  }
+
   return {
     verificationStatus,
     verificationReason,
     sellerBasePriceRub: sellerBasePriceRub != null && Number.isFinite(sellerBasePriceRub) ? Math.round(sellerBasePriceRub) : null,
     showcaseWalletPrice: showcase,
     walletPriceVerified: verified ? showcase : null,
-    priceWithoutWallet: null,
+    priceWithoutWallet,
     walletDiscountRub: null,
     walletDiscount: null,
     walletIconDetected,
     sourceSeller: sellerBasePriceRub != null && sellerBasePriceRub > 0 ? "wb_seller_api" : "none",
     sourceWalletVisible: showcase != null ? "dom_price_block" : "none",
     sourceWalletDetails: domWalletVerified ? "product_page_wallet_selector" : "none",
-    sourceWithoutWallet: domWalletVerified ? "formula" : "none",
+    sourceWithoutWallet,
     verificationMethod: domWalletVerified ? "dom_wallet" : "unverified",
     repricingAllowed: verified,
     trustedSource: domWalletVerified ? "product_page_wallet_selector" : "none",

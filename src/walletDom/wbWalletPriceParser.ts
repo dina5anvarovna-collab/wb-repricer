@@ -34,6 +34,7 @@ import {
   type BuyerPriceVerificationSnapshot,
 } from "../modules/pricing/buyerPriceVerification.js";
 import { walletArtifactsDir } from "../lib/runtimePaths.js";
+import { resolveNonWalletRubDetailed } from "../lib/nonWalletRubResolution.js";
 
 export type BrowserKind = "chrome" | "chromium";
 
@@ -473,6 +474,9 @@ export type WalletParserResult = {
   walletRub?: number | null;
   /** Цена без WB Кошелька, но с СПП (cookies / buyer / card сравнение). */
   nonWalletRub?: number | null;
+  /** Диагностика: как выбрана nonWalletRub (см. nonWalletRubResolution). */
+  nonWalletEvidence?: string | null;
+  nonWalletSource?: string | null;
   walletConfirmed?: boolean;
   walletEvidence?: WalletEvidenceKind;
   /** Отладочные строки, собранные из DOM (могут отсутствовать). */
@@ -920,11 +924,10 @@ function finalizeRepricerPriceSemantics(
     toRub(base.showcasePriceRub) ??
     null;
 
-  const nonWalletRub =
-    toRub(orc?.verifiedLocalWithoutWalletRub) ??
-    toRub(orc?.apiShowcaseRub) ??
-    toRub(base.nonWalletRub) ??
-    null;
+  const walletLineForCross =
+    toRub(base.walletRub) ?? toRub(base.priceWallet) ?? showcaseRub;
+  const nwDetail = resolveNonWalletRubDetailed(base, orc, walletLineForCross);
+  const nonWalletRub = nwDetail.nonWalletRub;
 
   let walletRub = toRub(base.walletRub ?? base.priceWallet);
   let walletConfirmed = Boolean(base.walletConfirmed);
@@ -939,16 +942,21 @@ function finalizeRepricerPriceSemantics(
   ) {
     walletRub = toRub(ver.walletPriceVerified);
     walletConfirmed = true;
-    walletEvidence = "buyer_session";
+    walletEvidence = "dom_wallet";
     if (!["parse_failed", "blocked_or_captcha", "auth_required", "loaded_no_price"].includes(parseStatus)) {
       parseStatus = "loaded_wallet_confirmed";
     }
   }
 
+  const strongWalletEvidence = (ev: WalletEvidenceKind | null | undefined) =>
+    ev === "dom_wallet" || ev === "buyer_session";
+
   if (showcaseRub != null && nonWalletRub != null && showcaseRub < nonWalletRub) {
     walletRub = showcaseRub;
     walletConfirmed = true;
-    walletEvidence = "showcase_less_than_nonwallet";
+    if (!strongWalletEvidence(walletEvidence)) {
+      walletEvidence = "showcase_less_than_nonwallet";
+    }
     if (!["parse_failed", "blocked_or_captcha", "auth_required", "loaded_no_price"].includes(parseStatus)) {
       parseStatus = "loaded_wallet_confirmed";
     }
@@ -967,6 +975,8 @@ function finalizeRepricerPriceSemantics(
     showcaseRub,
     showcaseRubEffective: showcaseRub,
     nonWalletRub,
+    nonWalletEvidence: nwDetail.nonWalletEvidence,
+    nonWalletSource: nwDetail.nonWalletSource,
     walletRub: walletConfirmed ? walletRub : null,
     walletConfirmed,
     walletEvidence,
