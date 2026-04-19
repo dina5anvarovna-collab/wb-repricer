@@ -22,6 +22,22 @@ type PrimaryRegion = {
   priceParseMode: PriceParseMode | null;
 };
 
+type UnifiedPricePayload = {
+  seller: {
+    sellerPriceRub: number | null;
+    sellerDiscountPct: number | null;
+    sellerDiscountPriceRub: number | null;
+  };
+  buyer: {
+    showcaseRub: number | null;
+    walletRub: number | null;
+    nonWalletRub: number | null;
+    priceRegular: number | null;
+  };
+  region?: string | null;
+  dest?: number | null;
+};
+
 /** Сводка каталога: цена WB Кошелёк и «с СПП» из одного региона (где минимальный WB) */
 type CatalogPriceHeadline = {
   dest: string;
@@ -99,21 +115,25 @@ function catalogPriceSummary(r: ProductRow): {
     br?.map((x) => x.regularPriceRub).filter((v): v is number => v != null && Number.isFinite(v) && v > 0) ?? [];
 
   let walletRub =
-    walletVals.length > 0
-      ? Math.min(...walletVals)
-      : r.primaryRegion?.walletPriceRub != null && r.primaryRegion.walletPriceRub > 0
-        ? Math.round(r.primaryRegion.walletPriceRub)
-        : r.lastWalletObservedRub != null && r.lastWalletObservedRub > 0
-          ? Math.round(r.lastWalletObservedRub)
-          : null;
+    r.walletRub != null && r.walletRub > 0
+      ? Math.round(r.walletRub)
+      : walletVals.length > 0
+        ? Math.min(...walletVals)
+        : r.primaryRegion?.walletPriceRub != null && r.primaryRegion.walletPriceRub > 0
+          ? Math.round(r.primaryRegion.walletPriceRub)
+          : r.lastWalletObservedRub != null && r.lastWalletObservedRub > 0
+            ? Math.round(r.lastWalletObservedRub)
+            : null;
   let regularRub =
-    regVals.length > 0
-      ? Math.min(...regVals)
-      : r.primaryRegion?.regularPriceRub != null && r.primaryRegion.regularPriceRub > 0
-        ? Math.round(r.primaryRegion.regularPriceRub)
-        : r.lastRegularObservedRub != null && r.lastRegularObservedRub > 0
-          ? Math.round(r.lastRegularObservedRub)
-          : null;
+    r.nonWalletRub != null && r.nonWalletRub > 0
+      ? Math.round(r.nonWalletRub)
+      : regVals.length > 0
+        ? Math.min(...regVals)
+        : r.primaryRegion?.regularPriceRub != null && r.primaryRegion.regularPriceRub > 0
+          ? Math.round(r.primaryRegion.regularPriceRub)
+          : r.lastRegularObservedRub != null && r.lastRegularObservedRub > 0
+            ? Math.round(r.lastRegularObservedRub)
+            : null;
   ({ wallet: walletRub, regular: regularRub } = enforceWalletSppOrder(walletRub, regularRub));
 
   const sppPct = r.sppPercentFromDiscounted ?? r.primaryRegion?.sppPercent ?? null;
@@ -198,6 +218,11 @@ type ProductRow = {
   repricingReason?: string | null;
   recommendedCabinetPriceRub?: number | null;
   safeModeRecommendationOnly?: boolean;
+  showcaseRub?: number | null;
+  walletRub?: number | null;
+  nonWalletRub?: number | null;
+  priceRegular?: number | null;
+  unified?: UnifiedPricePayload;
 };
 
 type ListResponse = {
@@ -237,13 +262,17 @@ function RegionBreakdownCell({ row }: { row: ProductRow }) {
     );
     if (!hasAny) {
       let fallbackWallet =
-        row.lastWalletObservedRub != null && row.lastWalletObservedRub > 0
-          ? Math.round(row.lastWalletObservedRub)
-          : null;
+        row.walletRub != null && row.walletRub > 0
+          ? Math.round(row.walletRub)
+          : row.lastWalletObservedRub != null && row.lastWalletObservedRub > 0
+            ? Math.round(row.lastWalletObservedRub)
+            : null;
       let fallbackSppPrice =
-        row.lastRegularObservedRub != null && row.lastRegularObservedRub > 0
-          ? Math.round(row.lastRegularObservedRub)
-          : null;
+        row.nonWalletRub != null && row.nonWalletRub > 0
+          ? Math.round(row.nonWalletRub)
+          : row.lastRegularObservedRub != null && row.lastRegularObservedRub > 0
+            ? Math.round(row.lastRegularObservedRub)
+            : null;
       ({ wallet: fallbackWallet, regular: fallbackSppPrice } = enforceWalletSppOrder(
         fallbackWallet,
         fallbackSppPrice,
@@ -333,15 +362,19 @@ function RegionBreakdownCell({ row }: { row: ProductRow }) {
 
   const pr = row.primaryRegion;
   let wRub =
-    pr?.walletPriceRub ??
-    (row.lastWalletObservedRub != null && row.lastWalletObservedRub > 0
-      ? Math.round(row.lastWalletObservedRub)
-      : null);
+    row.walletRub != null && row.walletRub > 0
+      ? Math.round(row.walletRub)
+      : pr?.walletPriceRub ??
+        (row.lastWalletObservedRub != null && row.lastWalletObservedRub > 0
+          ? Math.round(row.lastWalletObservedRub)
+          : null);
   let fRub =
-    pr?.regularPriceRub ??
-    (row.lastRegularObservedRub != null && row.lastRegularObservedRub > 0
-      ? Math.round(row.lastRegularObservedRub)
-      : null);
+    row.nonWalletRub != null && row.nonWalletRub > 0
+      ? Math.round(row.nonWalletRub)
+      : pr?.regularPriceRub ??
+        (row.lastRegularObservedRub != null && row.lastRegularObservedRub > 0
+          ? Math.round(row.lastRegularObservedRub)
+          : null);
   ({ wallet: wRub, regular: fRub } = enforceWalletSppOrder(wRub, fRub));
   const destKey = pr?.dest ?? row.lastMonitorRegionDest ?? "";
   const displayLabel =
@@ -352,11 +385,13 @@ function RegionBreakdownCell({ row }: { row: ProductRow }) {
   }
   const w = wRub != null ? `${fmtRub(wRub)} ₽` : "—";
   const sppRub =
-    pr?.regularPriceRub != null && pr.regularPriceRub > 0
-      ? pr.regularPriceRub
-      : row.lastRegularObservedRub != null && row.lastRegularObservedRub > 0
-        ? Math.round(row.lastRegularObservedRub)
-        : null;
+    row.nonWalletRub != null && row.nonWalletRub > 0
+      ? row.nonWalletRub
+      : pr?.regularPriceRub != null && pr.regularPriceRub > 0
+        ? pr.regularPriceRub
+        : row.lastRegularObservedRub != null && row.lastRegularObservedRub > 0
+          ? Math.round(row.lastRegularObservedRub)
+          : null;
   const f = sppRub != null ? `${fmtRub(sppRub)} ₽` : "—";
   return (
     <div className="max-w-[320px] text-xs leading-snug">

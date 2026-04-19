@@ -1,6 +1,14 @@
 import type { MinPriceRule, PriceSnapshot, WbProduct } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 import { env } from "../config/env.js";
+import {
+  buildBuyerSideFromWbProductCache,
+  buildSellerSideFromWbProduct,
+  buildUnifiedObservation,
+  destStringToNumber,
+  type UnifiedPriceObservationJson,
+  toUnifiedRub,
+} from "./unifiedPriceModel.js";
 import { prisma } from "./prisma.js";
 import { computeRepricingSummary } from "./repricingSummary.js";
 import { regionLabelForDest } from "./wbRegions.js";
@@ -329,6 +337,12 @@ export type ProductTableRow = WbProduct & {
   repricingReason: string;
   recommendedCabinetPriceRub: number | null;
   safeModeRecommendationOnly: boolean;
+  /** Buyer/DOM модель для API/UI (primary snapshot или кэш товара). */
+  showcaseRub: number | null;
+  walletRub: number | null;
+  nonWalletRub: number | null;
+  priceRegular: number | null;
+  unified: UnifiedPriceObservationJson;
 };
 
 function humanRegionLabel(
@@ -349,15 +363,35 @@ function humanRegionLabel(
   return "Профиль по умолчанию";
 }
 
-function finalFromSnapshot(s: {
-  buyerWalletPrice: number | null | undefined;
-  buyerRegularPrice: number | null | undefined;
-}): number | null {
-  const w = s.buyerWalletPrice;
-  const r = s.buyerRegularPrice;
-  if (w != null && Number.isFinite(w) && w > 0) return Math.round(w);
-  if (r != null && Number.isFinite(r) && r > 0) return Math.round(r);
+/** Итог «главной» цены покупателя для подсказок: кошелёк, иначе СПП без кошелька (новая модель полей снимка). */
+function finalFromSnapshot(s: Pick<PriceSnapshot, "walletRub" | "buyerWalletPrice" | "nonWalletRub" | "buyerRegularPrice">): number | null {
+  const w = toUnifiedRub(s.walletRub ?? s.buyerWalletPrice);
+  const nw = toUnifiedRub(s.nonWalletRub ?? s.buyerRegularPrice);
+  if (w != null) return w;
+  if (nw != null) return nw;
   return null;
+}
+
+function buildUnifiedForCatalogRow(
+  p: WbProduct,
+  primarySnap: PriceSnapshot | null,
+  primaryDest: string | null,
+  primaryLabel: string | null,
+): UnifiedPriceObservationJson {
+  const seller = buildSellerSideFromWbProduct(p);
+  const buyer =
+    primarySnap != null
+      ? {
+          showcaseRub: toUnifiedRub(primarySnap.showcaseRub ?? primarySnap.buyerWalletPrice),
+          walletRub: toUnifiedRub(primarySnap.walletRub ?? primarySnap.buyerWalletPrice),
+          nonWalletRub: toUnifiedRub(primarySnap.nonWalletRub ?? primarySnap.buyerRegularPrice),
+          priceRegular: toUnifiedRub(primarySnap.priceRegular),
+        }
+      : buildBuyerSideFromWbProductCache(p);
+  return buildUnifiedObservation(seller, buyer, {
+    region: primaryLabel,
+    dest: primaryDest != null ? destStringToNumber(primaryDest) : null,
+  });
 }
 
 /**
@@ -484,6 +518,8 @@ export async function enrichProductsForTable(
       }
     }
 
+    const buyerProductCache = buildBuyerSideFromWbProductCache(p);
+
     let destOrder: string[];
     if (destFilter && destFilter.length > 0) {
       destOrder = destFilter;
@@ -516,13 +552,15 @@ export async function enrichProductsForTable(
         };
       }
       let walletPriceRub =
-        s.buyerWalletPrice != null && Number.isFinite(s.buyerWalletPrice) && s.buyerWalletPrice > 0
+        toUnifiedRub(s.walletRub) ??
+        (s.buyerWalletPrice != null && Number.isFinite(s.buyerWalletPrice) && s.buyerWalletPrice > 0
           ? Math.round(s.buyerWalletPrice)
-          : null;
+          : null);
       let regularPriceRub =
-        s.buyerRegularPrice != null && Number.isFinite(s.buyerRegularPrice) && s.buyerRegularPrice > 0
+        toUnifiedRub(s.nonWalletRub) ??
+        (s.buyerRegularPrice != null && Number.isFinite(s.buyerRegularPrice) && s.buyerRegularPrice > 0
           ? Math.round(s.buyerRegularPrice)
-          : null;
+          : null);
       ({ wallet: walletPriceRub, regular: regularPriceRub } = enforceWalletNotAboveSpp(
         walletPriceRub,
         regularPriceRub,
@@ -561,10 +599,15 @@ export async function enrichProductsForTable(
       .map((r) => r.walletPriceRub as number);
     let showcaseFinalRub = finals.length > 0 ? Math.min(...finals) : null;
     if (showcaseFinalRub == null) {
-      showcaseFinalRub = finalFromSnapshot({
-        buyerWalletPrice: p.lastWalletObservedRub,
-        buyerRegularPrice: p.lastRegularObservedRub,
-      });
+      showcaseFinalRub =
+        buyerProductCache.walletRub ??
+        buyerProductCache.showcaseRub ??
+        finalFromSnapshot({
+          walletRub: p.lastKnownWalletRub,
+          buyerWalletPrice: p.lastWalletObservedRub,
+          nonWalletRub: p.lastRegularObservedRub,
+          buyerRegularPrice: p.lastRegularObservedRub,
+        });
     }
     let sppPercentFromDiscounted = regionBreakdown
       .map((r) => r.sppPercent)
@@ -616,6 +659,7 @@ export async function enrichProductsForTable(
       if (!hasSnapshotPrices) {
         let walletPriceRub =
           primaryRegion.walletPriceRub ??
+          buyerProductCache.walletRub ??
           (p.lastWalletObservedRub != null &&
           Number.isFinite(p.lastWalletObservedRub) &&
           p.lastWalletObservedRub > 0
@@ -623,6 +667,7 @@ export async function enrichProductsForTable(
             : null);
         let regularPriceRub =
           primaryRegion.regularPriceRub ??
+          buyerProductCache.nonWalletRub ??
           (p.lastRegularObservedRub != null &&
           Number.isFinite(p.lastRegularObservedRub) &&
           p.lastRegularObservedRub > 0
@@ -677,6 +722,9 @@ export async function enrichProductsForTable(
       sellerCabinetPriceRub: p.sellerPrice,
       safeModeRecommendationOnly,
     });
+
+    const unified = buildUnifiedForCatalogRow(p, primarySnapshot, primaryDest, primaryRegion?.label ?? null);
+
     return {
       ...p,
       fixedOrMinRub,
@@ -706,6 +754,11 @@ export async function enrichProductsForTable(
       repricingReason: repricingSummary.repricingReason,
       recommendedCabinetPriceRub: repricingSummary.recommendedCabinetPriceRub,
       safeModeRecommendationOnly,
+      showcaseRub: unified.buyer.showcaseRub,
+      walletRub: unified.buyer.walletRub,
+      nonWalletRub: unified.buyer.nonWalletRub,
+      priceRegular: unified.buyer.priceRegular,
+      unified,
     };
   });
 }

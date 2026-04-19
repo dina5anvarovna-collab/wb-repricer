@@ -734,6 +734,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       const noBuyerPrices = items.every(
         (it) =>
           (it.showcaseFinalRub == null || it.showcaseFinalRub <= 0) &&
+          (it.walletRub == null || it.walletRub <= 0) &&
           (it.lastWalletObservedRub == null || it.lastWalletObservedRub <= 0) &&
           (it.lastRegularObservedRub == null || it.lastRegularObservedRub <= 0),
       );
