@@ -441,6 +441,8 @@ export type WalletEvidenceKind =
   | "showcase_less_than_nonwallet"
   /** Верификация DOM: селектор кошелька / интеграция buyerPriceVerification */
   | "dom_wallet"
+  /** Popup «Детализация цены»: подтверждение строки «с WB Кошельком» (не источник nonWalletRub). */
+  | "price_details"
   | null;
 
 /**
@@ -479,6 +481,8 @@ export type WalletParserResult = {
   nonWalletSource?: string | null;
   walletConfirmed?: boolean;
   walletEvidence?: WalletEvidenceKind;
+  /** Все сработавшие признаки (порядок = порядок обнаружения); primary — walletEvidence. */
+  walletEvidenceLayers?: WalletEvidenceKind[] | null;
   /** Отладочные строки, собранные из DOM (могут отсутствовать). */
   lines?: string[];
   walletLabel: string | null;
@@ -909,6 +913,34 @@ function buildWalletResult(input: {
   };
 }
 
+function mergeWalletEvidenceLayers(
+  existing: WalletEvidenceKind[] | null | undefined,
+  ...add: (WalletEvidenceKind | null | undefined)[]
+): WalletEvidenceKind[] {
+  const out: WalletEvidenceKind[] = [...(existing ?? [])];
+  for (const a of add) {
+    if (a != null && !out.includes(a)) out.push(a);
+  }
+  return out;
+}
+
+/** Приоритет отображения одного поля walletEvidence (остальное остаётся в walletEvidenceLayers). */
+const WALLET_EVIDENCE_PRIMARY_ORDER: Array<Exclude<WalletEvidenceKind, null>> = [
+  "dom_wallet",
+  "buyer_session",
+  "price_details",
+  "showcase_less_than_nonwallet",
+  "wallet_label",
+  "wallet_marker",
+];
+
+function pickPrimaryWalletEvidence(layers: WalletEvidenceKind[]): WalletEvidenceKind {
+  for (const p of WALLET_EVIDENCE_PRIMARY_ORDER) {
+    if (layers.includes(p)) return p;
+  }
+  return layers[0] ?? null;
+}
+
 function finalizeRepricerPriceSemantics(
   base: WalletParserResult,
   orc: ShowcaseOrchestratorResult | null,
@@ -930,9 +962,18 @@ function finalizeRepricerPriceSemantics(
   const nonWalletRub = nwDetail.nonWalletRub;
 
   let walletRub = toRub(base.walletRub ?? base.priceWallet);
-  let walletConfirmed = Boolean(base.walletConfirmed);
-  let walletEvidence = base.walletEvidence ?? null;
   let parseStatus = base.parseStatus;
+
+  let layers = mergeWalletEvidenceLayers(base.walletEvidenceLayers, base.walletEvidence);
+
+  const hasWalletLabel =
+    typeof base.walletLabel === "string" && base.walletLabel.trim().length > 0;
+  if (hasWalletLabel) {
+    layers = mergeWalletEvidenceLayers(layers, "wallet_label");
+  }
+  if (base.walletIconDetected === true) {
+    layers = mergeWalletEvidenceLayers(layers, "wallet_marker");
+  }
 
   const ver = base.buyerPriceVerification;
   if (
@@ -941,26 +982,40 @@ function finalizeRepricerPriceSemantics(
     toRub(ver.walletPriceVerified) != null
   ) {
     walletRub = toRub(ver.walletPriceVerified);
-    walletConfirmed = true;
-    walletEvidence = "dom_wallet";
+    layers = mergeWalletEvidenceLayers(layers, "dom_wallet");
     if (!["parse_failed", "blocked_or_captcha", "auth_required", "loaded_no_price"].includes(parseStatus)) {
       parseStatus = "loaded_wallet_confirmed";
     }
   }
 
-  const strongWalletEvidence = (ev: WalletEvidenceKind | null | undefined) =>
-    ev === "dom_wallet" || ev === "buyer_session";
+  /** Popup «Детализация»: только подтверждение кошелька (не источник nonWalletRub). */
+  const popupWalletRub = toRub(base.popupWalletRub);
+  if (base.popupOpened === true && popupWalletRub != null) {
+    layers = mergeWalletEvidenceLayers(layers, "price_details");
+    if (walletRub == null) {
+      walletRub = popupWalletRub;
+    }
+  }
 
   if (showcaseRub != null && nonWalletRub != null && showcaseRub < nonWalletRub) {
     walletRub = showcaseRub;
-    walletConfirmed = true;
-    if (!strongWalletEvidence(walletEvidence)) {
-      walletEvidence = "showcase_less_than_nonwallet";
-    }
+    layers = mergeWalletEvidenceLayers(layers, "showcase_less_than_nonwallet");
     if (!["parse_failed", "blocked_or_captcha", "auth_required", "loaded_no_price"].includes(parseStatus)) {
       parseStatus = "loaded_wallet_confirmed";
     }
   }
+
+  const walletEvidence = pickPrimaryWalletEvidence(layers);
+
+  let walletConfirmed =
+    walletRub != null &&
+    (layers.length > 0 ||
+      Boolean(base.walletConfirmed) ||
+      hasWalletLabel ||
+      base.walletIconDetected === true ||
+      (showcaseRub != null && nonWalletRub != null && showcaseRub < nonWalletRub) ||
+      (ver?.verificationStatus === "VERIFIED" && ver.trustedSource === "product_page_wallet_selector") ||
+      (base.popupOpened === true && popupWalletRub != null));
 
   if (
     !walletConfirmed &&
@@ -980,6 +1035,7 @@ function finalizeRepricerPriceSemantics(
     walletRub: walletConfirmed ? walletRub : null,
     walletConfirmed,
     walletEvidence,
+    walletEvidenceLayers: layers.length > 0 ? layers : null,
     parseStatus,
     priceWallet: walletConfirmed ? walletRub : null,
   };

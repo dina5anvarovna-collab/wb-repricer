@@ -22,8 +22,10 @@ export type ParseProbeNormalizedPrices = {
   nonWalletEvidence: string | null;
   nonWalletSource: string | null;
   walletConfirmed: boolean;
-  /** Итоговый «лучший» evidence для UI (после finalize + согласованные приоритеты) */
+  /** Итоговый primary evidence (см. pickPrimary в finalize) */
   walletEvidence: WalletEvidenceKind;
+  /** Все сработавшие признаки, без потери приоритета */
+  walletEvidenceLayers: WalletEvidenceKind[];
   verificationMethod: string | null;
   verificationStatus: string | null;
   verificationReason: string | null;
@@ -70,11 +72,12 @@ export function normalizeParseProbePriceFields(r: WalletParserResult): ParseProb
   const domWalletMethod = r.verificationMethod === "dom_wallet";
 
   const walletConfirmed =
-    Boolean(r.walletConfirmed) ||
-    r.verificationStatus === "VERIFIED" ||
-    hasWalletLabel ||
-    r.walletIconDetected === true ||
-    domWalletMethod;
+    typeof r.walletConfirmed === "boolean"
+      ? r.walletConfirmed
+      : r.verificationStatus === "VERIFIED" ||
+        hasWalletLabel ||
+        r.walletIconDetected === true ||
+        domWalletMethod;
 
   /** Сырой evidence с поля парсера (до API-фолбэков) */
   const parserWalletEvidenceRaw: WalletEvidenceKind = r.walletEvidence ?? null;
@@ -136,6 +139,7 @@ export function normalizeParseProbePriceFields(r: WalletParserResult): ParseProb
     nonWalletSource,
     walletConfirmed,
     walletEvidence,
+    walletEvidenceLayers: r.walletEvidenceLayers ?? [],
     verificationMethod,
     verificationStatus,
     verificationReason,

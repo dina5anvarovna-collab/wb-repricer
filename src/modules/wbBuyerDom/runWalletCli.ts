@@ -33,6 +33,7 @@ export type BuyerDomResult = {
   nonWalletRub?: number | null;
   walletConfirmed?: boolean | null;
   walletEvidence?: WalletEvidenceKind | null;
+  walletEvidenceLayers?: WalletEvidenceKind[] | null;
   priceDiscounted: number | null;
   priceWallet: number | null;
   walletLabel: string | null;
@@ -190,9 +191,27 @@ function walletResultFromCliJson(
     wEv === "wallet_label" ||
     wEv === "wallet_marker" ||
     wEv === "showcase_less_than_nonwallet" ||
-    wEv === "dom_wallet"
+    wEv === "dom_wallet" ||
+    wEv === "price_details"
       ? wEv
       : undefined;
+
+  let walletEvidenceLayers: WalletEvidenceKind[] | undefined;
+  if (Array.isArray(j.walletEvidenceLayers)) {
+    const allowed = new Set<string>([
+      "buyer_session",
+      "wallet_label",
+      "wallet_marker",
+      "showcase_less_than_nonwallet",
+      "dom_wallet",
+      "price_details",
+    ]);
+    const raw = j.walletEvidenceLayers.filter(
+      (x): x is WalletEvidenceKind =>
+        typeof x === "string" && allowed.has(x),
+    );
+    walletEvidenceLayers = raw.length > 0 ? raw : undefined;
+  }
 
   return {
     nmId: typeof j.nmId === "number" ? j.nmId : defaults.nmId,
@@ -207,6 +226,7 @@ function walletResultFromCliJson(
     nonWalletRub: typeof j.nonWalletRub === "number" ? j.nonWalletRub : undefined,
     walletConfirmed: j.walletConfirmed === true ? true : j.walletConfirmed === false ? false : undefined,
     walletEvidence,
+    walletEvidenceLayers,
     discountedPrice: typeof j.discountedPrice === "number" ? j.discountedPrice : null,
     priceWallet: typeof j.priceWallet === "number" ? j.priceWallet : null,
     walletLabel: typeof j.walletLabel === "string" ? j.walletLabel : null,
@@ -339,6 +359,7 @@ export function walletParserResultToBuyerDom(r: WalletParserResult): BuyerDomRes
     nonWalletRub: r.nonWalletRub ?? r.priceWithSppWithoutWalletRub ?? null,
     walletConfirmed: typeof r.walletConfirmed === "boolean" ? r.walletConfirmed : null,
     walletEvidence: r.walletEvidence ?? null,
+    walletEvidenceLayers: r.walletEvidenceLayers ?? null,
     priceDiscounted: r.discountedPrice,
     priceWallet: r.priceWallet,
     walletLabel: r.walletLabel,

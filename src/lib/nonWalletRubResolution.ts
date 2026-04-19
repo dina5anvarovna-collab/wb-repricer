@@ -30,7 +30,8 @@ function apiWalletChain(base: WalletParserResult, orc: ShowcaseOrchestratorResul
 }
 
 /**
- * Единая цепочка кандидатов «цена без WB Кошелька, с СПП» (cookies / card / DOM / verified).
+ * Единая цепочка кандидатов «цена без WB Кошелька, с СПП» (cookies / buyer / card).
+ * Не используем popup «Детализация цены» — он только для валидации кошелька (см. finalizeRepricerPriceSemantics).
  */
 export function resolveNonWalletRubDetailed(
   base: WalletParserResult,
@@ -41,6 +42,16 @@ export function resolveNonWalletRubDetailed(
   const apiWallet = apiWalletChain(base, orc);
 
   const tries: Array<{ rub: number | null; ev: string; src: string }> = [];
+
+  /** Приоритет: buyer/cookies verification, затем DOM SPP, orchestrator local, card-эвристики. */
+  const bpvPw = toRub(base.buyerPriceVerification?.priceWithoutWallet);
+  if (bpvPw != null) {
+    tries.push({
+      rub: bpvPw,
+      ev: "buyer_verification_price_without_wallet",
+      src: "buyerPriceVerification.priceWithoutWallet",
+    });
+  }
 
   const vOrb = toRub(orc?.verifiedLocalWithoutWalletRub);
   if (vOrb != null) {
@@ -57,24 +68,6 @@ export function resolveNonWalletRubDetailed(
       rub: sppDom,
       ev: "dom_price_with_spp_without_wallet",
       src: "priceWithSppWithoutWalletRub",
-    });
-  }
-
-  const bpvPw = toRub(base.buyerPriceVerification?.priceWithoutWallet);
-  if (bpvPw != null) {
-    tries.push({
-      rub: bpvPw,
-      ev: "buyer_verification_price_without_wallet",
-      src: "buyerPriceVerification.priceWithoutWallet",
-    });
-  }
-
-  const popupNw = toRub(base.popupWithoutWalletRub);
-  if (popupNw != null) {
-    tries.push({
-      rub: popupNw,
-      ev: "popup_detail_without_wallet",
-      src: "popupWithoutWalletRub",
     });
   }
 
