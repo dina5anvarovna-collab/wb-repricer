@@ -183,6 +183,46 @@ function buyerVerificationMeta(snapshot: PriceSnapshot | null | undefined): Buye
   };
 }
 
+/** Блокеры из resolveObservedBuyerPrices / detailJson: DOM wallet нельзя считать подтверждённым. */
+const AMBIGUOUS_WALLET_BLOCKED = new Set([
+  "region_price_ambiguous",
+  "region_not_confirmed",
+  "spp_missing_cookie_showcase",
+]);
+
+/**
+ * Не поднимать DOM/fallback wallet в итоговый buyer, если верификация не прошла и есть явные сигналы
+ * расхождения card/DOM или региона (см. задачу ambiguous wallet).
+ */
+export function shouldSuppressAmbiguousDomWallet(meta: BuyerVerificationMeta): boolean {
+  if (meta.verificationStatus === "VERIFIED") return false;
+  const blocked = meta.blockedBySafetyRule ?? [];
+  if (blocked.some((b) => AMBIGUOUS_WALLET_BLOCKED.has(b))) return true;
+  const reason = (meta.verificationReason ?? "").toLowerCase();
+  return (
+    reason.includes("cardapi_diff") ||
+    reason.includes("region_dom_not_confirmed") ||
+    reason.includes("ambiguous")
+  );
+}
+
+/**
+ * При ambiguous/unverified DOM wallet: не экспортировать wallet/showcase как подтверждённую витрину кошелька;
+ * nonWallet оставить из снимка; priceRegular — из seller API при отсутствии надёжной buyer зачёркнутой.
+ */
+function sanitizeBuyerSideAfterAmbiguousWallet(
+  buyer: BuyerSidePricesJson,
+  seller: SellerSidePricesJson,
+): BuyerSidePricesJson {
+  return {
+    showcaseRub: null,
+    walletRub: null,
+    nonWalletRub: buyer.nonWalletRub,
+    priceRegular:
+      seller.sellerDiscountPriceRub ?? seller.sellerPriceRub ?? buyer.priceRegular,
+  };
+}
+
 function snapshotPriceMeta(snapshot: PriceSnapshot, walletRub: number | null, regularRub: number | null): SnapshotPriceMeta {
   let dj: Record<string, unknown> = {};
   try {
@@ -567,7 +607,8 @@ export async function enrichProductsForTable(
         };
       }
       const bs = buildBuyerSideFromPriceSnapshot(s);
-      let walletPriceRub = bs.walletRub;
+      const vm = buyerVerificationMeta(s);
+      let walletPriceRub = shouldSuppressAmbiguousDomWallet(vm) ? null : bs.walletRub;
       let regularPriceRub = bs.nonWalletRub;
       ({ wallet: walletPriceRub, regular: regularPriceRub } = enforceWalletNotAboveSpp(
         walletPriceRub,
@@ -579,7 +620,6 @@ export async function enrichProductsForTable(
         regularPriceRub,
       ));
       const meta = snapshotPriceMeta(s, walletPriceRub, regularPriceRub);
-      const vm = buyerVerificationMeta(s);
       const sppPercent = meta.sppPercent;
       return {
         dest: dNorm,
@@ -620,9 +660,11 @@ export async function enrichProductsForTable(
     const primaryDest = primaryDestRaw != null ? primaryDestRaw.trim() : null;
     let primaryRegion: PrimaryRegionPrices | null = null;
     let primarySnapshot: PriceSnapshot | null = null;
+    let primaryVerificationMeta = buyerVerificationMeta(null);
     if (primaryDest != null) {
       const primarySnap = snapshotForDest(perDest, primaryDest);
       primarySnapshot = primarySnap ?? null;
+      primaryVerificationMeta = buyerVerificationMeta(primarySnapshot);
       const row = regionBreakdown.find((r) => r.dest === primaryDest);
       if (row) {
         primaryRegion = {
@@ -652,8 +694,10 @@ export async function enrichProductsForTable(
         (primaryRegion.regularPriceRub != null && primaryRegion.regularPriceRub > 0);
       if (!hasSnapshotPrices) {
         const fb = catalogPrimaryBuyerSide(primarySnapshot, p);
-        let walletPriceRub =
-          primaryRegion.walletPriceRub ?? fb.walletRub ?? fb.showcaseRub ?? null;
+        const suppressWallet = shouldSuppressAmbiguousDomWallet(primaryVerificationMeta);
+        let walletPriceRub = suppressWallet
+          ? primaryRegion.walletPriceRub ?? null
+          : primaryRegion.walletPriceRub ?? fb.walletRub ?? fb.showcaseRub ?? null;
         let regularPriceRub = primaryRegion.regularPriceRub ?? fb.nonWalletRub ?? null;
         ({ wallet: walletPriceRub, regular: regularPriceRub } = enforceWalletNotAboveSpp(
           walletPriceRub,
@@ -680,7 +724,10 @@ export async function enrichProductsForTable(
     }
 
     const seller = buildSellerSideFromWbProduct(p);
-    const buyerPrimary = catalogPrimaryBuyerSide(primarySnapshot, p);
+    let buyerPrimary = catalogPrimaryBuyerSide(primarySnapshot, p);
+    if (shouldSuppressAmbiguousDomWallet(primaryVerificationMeta)) {
+      buyerPrimary = sanitizeBuyerSideAfterAmbiguousWallet(buyerPrimary, seller);
+    }
     const unified = buildUnifiedObservation(seller, buyerPrimary, {
       region: primaryRegion?.label ?? null,
       dest: primaryDest != null ? destStringToNumber(primaryDest) : null,
@@ -695,7 +742,7 @@ export async function enrichProductsForTable(
     }
 
     const pricingStatusHint = pricingStatusHintForRow(p, fixedOrMinRub, primaryBuyerFinalForHint);
-    const verificationMeta = buyerVerificationMeta(primarySnapshot);
+    const verificationMeta = primaryVerificationMeta;
     const totalRegionsCount = regionBreakdown.length;
     const validRegionsCount = regionBreakdown.filter(
       (r) =>
