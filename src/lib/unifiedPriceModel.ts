@@ -63,7 +63,8 @@ export function buildBuyerSideFromPriceSnapshot(
 ): BuyerSidePricesJson {
   return {
     showcaseRub: toUnifiedRub(s.showcaseRub ?? s.buyerWalletPrice),
-    walletRub: toUnifiedRub(s.walletRub),
+    /** Семантика как в parse-probe: подтверждённый кошелёк или устаревшее имя колонки buyerWalletPrice. */
+    walletRub: toUnifiedRub(s.walletRub ?? s.buyerWalletPrice),
     nonWalletRub: toUnifiedRub(s.nonWalletRub ?? s.buyerRegularPrice),
     priceRegular: toUnifiedRub(s.priceRegular),
   };
@@ -84,6 +85,35 @@ export function buildBuyerSideFromWbProductCache(
     walletRub: toUnifiedRub(p.lastKnownWalletRub),
     nonWalletRub: toUnifiedRub(p.lastRegularObservedRub),
     priceRegular: toUnifiedRub(p.lastPriceRegularObservedRub),
+  };
+}
+
+/**
+ * Единственная цепочка fallback для каталога, когда нет свежего PriceSnapshot по primary региону
+ * или снимок пустой: кэш карточки → last good (safe mode) → последние legacy last* колонки.
+ * Не использовать как primary source, если unified уже собран из снимка.
+ */
+export function buildBuyerSideFromWbProductFallbackChain(
+  p: Pick<
+    WbProduct,
+    | "lastKnownShowcaseRub"
+    | "lastWalletObservedRub"
+    | "lastKnownWalletRub"
+    | "lastRegularObservedRub"
+    | "lastPriceRegularObservedRub"
+    | "walletRubLastGood"
+    | "nonWalletRubLastGood"
+  >,
+): BuyerSidePricesJson {
+  const base = buildBuyerSideFromWbProductCache(p);
+  return {
+    showcaseRub: base.showcaseRub,
+    walletRub:
+      base.walletRub ??
+      toUnifiedRub(p.walletRubLastGood) ??
+      toUnifiedRub(p.lastWalletObservedRub),
+    nonWalletRub: base.nonWalletRub ?? toUnifiedRub(p.nonWalletRubLastGood),
+    priceRegular: base.priceRegular,
   };
 }
 
