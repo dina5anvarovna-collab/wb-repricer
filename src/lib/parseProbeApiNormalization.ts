@@ -146,3 +146,18 @@ export function normalizeParseProbePriceFields(r: WalletParserResult): ParseProb
     walletEvidenceRaw: rawPayload,
   };
 }
+
+/** Диагностика для POST /api/settings/parse-probe-* (источники non-wallet / кошелёк, сырьё SPP). */
+export function buildParseProbeDiagnostics(r: WalletParserResult) {
+  return {
+    nonWalletSourceUsed: r.nonWalletSource ?? null,
+    walletSourceUsed: r.walletEvidence ?? null,
+    priceWithSppWithoutWalletRubRaw: r.priceWithSppWithoutWalletRub ?? null,
+    buyerPriceVerificationPriceWithoutWallet: r.buyerPriceVerification?.priceWithoutWallet ?? null,
+    sourceConflictDetected: r.sourceConflictDetected === true,
+    sourceConflictReason:
+      r.sourceConflictDetected === true
+        ? (r.showcaseResolutionNote ?? r.verificationReason ?? null)
+        : null,
+  };
+}

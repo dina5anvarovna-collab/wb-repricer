@@ -11,6 +11,8 @@ import {
 export type WalletDomParseLike = {
   priceRegular: number | null;
   priceWallet: number | null;
+  /** DOM/orchestrator: цена с СПП без WB Кошелька (до финального merge). */
+  priceWithSppWithoutWalletRub?: number | null;
   showcasePriceRub?: number | null;
   showcaseRubFromDom?: number | null;
   walletIconDetected?: boolean | null;
@@ -482,25 +484,45 @@ export async function resolveShowcaseForMonitorStep(input: {
     sourceConflictDetected: boolean;
     sourceConflictDeltaRub: number | null;
     conflictAcceptedSource: "local_verified" | "card_api" | "none";
-  }): ShowcaseOrchestratorResult => ({
-    effectiveShowcaseRub: partial.effectiveShowcaseRub,
-    showcasePriceRub: partial.effectiveShowcaseRub,
-    priceWithSppWithoutWalletRub: null,
-    source: partial.source,
-    verificationSource: partial.verificationSource,
-    sourcePriority: partial.sourcePriority,
-    sourceConflictDetected: partial.sourceConflictDetected,
-    sourceConflictDeltaRub: partial.sourceConflictDeltaRub,
-    conflictAcceptedSource: partial.conflictAcceptedSource,
-    verifiedLocalShowcaseRub: localVerified.showcaseRub,
-    verifiedLocalWithoutWalletRub: localVerified.withoutWalletRub,
-    apiShowcaseRub: partial.apiShowcaseRub,
-    apiWalletRub: partial.apiWalletRub,
-    resolutionNote: partial.resolutionNote,
-    walletRub,
-    cardMeta: partial.cardMeta,
-    destEffective: destEff,
-  });
+    /** Редко: явный SPP без кошелька с card/ветки (иначе берём dom → buyer verif → card tier). */
+    priceWithSppWithoutWalletRubOverride?: number | null;
+  }): ShowcaseOrchestratorResult => {
+    const domSpp =
+      walletDom.priceWithSppWithoutWalletRub != null && Number.isFinite(walletDom.priceWithSppWithoutWalletRub)
+        ? Math.round(walletDom.priceWithSppWithoutWalletRub)
+        : null;
+    const cardSppTier =
+      partial.apiShowcaseRub != null &&
+      partial.apiWalletRub != null &&
+      partial.apiShowcaseRub > partial.apiWalletRub
+        ? Math.round(partial.apiShowcaseRub)
+        : null;
+    const spp =
+      partial.priceWithSppWithoutWalletRubOverride ??
+      domSpp ??
+      localVerified.withoutWalletRub ??
+      cardSppTier ??
+      null;
+    return {
+      effectiveShowcaseRub: partial.effectiveShowcaseRub,
+      showcasePriceRub: partial.effectiveShowcaseRub,
+      priceWithSppWithoutWalletRub: spp,
+      source: partial.source,
+      verificationSource: partial.verificationSource,
+      sourcePriority: partial.sourcePriority,
+      sourceConflictDetected: partial.sourceConflictDetected,
+      sourceConflictDeltaRub: partial.sourceConflictDeltaRub,
+      conflictAcceptedSource: partial.conflictAcceptedSource,
+      verifiedLocalShowcaseRub: localVerified.showcaseRub,
+      verifiedLocalWithoutWalletRub: localVerified.withoutWalletRub,
+      apiShowcaseRub: partial.apiShowcaseRub,
+      apiWalletRub: partial.apiWalletRub,
+      resolutionNote: partial.resolutionNote,
+      walletRub,
+      cardMeta: partial.cardMeta,
+      destEffective: destEff,
+    };
+  };
 
   if (tryCardApi && page) {
     let pair = await fetchCardPricePairViaPageEvaluate(page, nmId, destEff);

@@ -35,6 +35,7 @@ import {
 } from "../modules/pricing/buyerPriceVerification.js";
 import { walletArtifactsDir } from "../lib/runtimePaths.js";
 import { resolveNonWalletRubDetailed } from "../lib/nonWalletRubResolution.js";
+import { regionLabelForDest } from "../lib/wbRegions.js";
 
 export type BrowserKind = "chrome" | "chromium";
 
@@ -521,6 +522,10 @@ export type WalletParserResult = {
   firstVisiblePriceText?: string | null;
   /** Принятая из DOM цена кошелька до source-orchestrator. */
   walletPriceRubAcceptedFromDom?: number | null;
+  /** Человекочитаемое имя региона (wb-regions.json), если известно. */
+  regionLabel?: string | null;
+  /** Значение warehouse `dest`, переданное в парсер или из REPRICER_WALLET_DEST. */
+  destRequested?: string | null;
   /** Фактический URL вкладки после парсинга (SPA может убрать `dest` из query). */
   browserUrlAfterParse?: string | null;
   /** `dest` в запросах card.wb.ru для витрины на этом шаге (склад WB). */
@@ -892,16 +897,37 @@ function buildWalletResult(input: {
       ? dom.regularPrice
       : null;
 
+  /** Средняя ступень «с СПП без кошелька»: верх buy-zone, если нижняя = кошелёк и верх не совпадает с зачёркнутой. */
+  const strikeRub =
+    dom.oldPriceRub != null && Number.isFinite(dom.oldPriceRub) && dom.oldPriceRub > 0
+      ? Math.round(dom.oldPriceRub)
+      : null;
+  let priceWithSppWithoutWalletRub: number | null = null;
+  if (
+    hasDistinctPair &&
+    pairLow != null &&
+    pairHigh != null &&
+    walletRubResolved != null &&
+    Math.round(walletRubResolved) === Math.round(pairLow) &&
+    pairHigh > pairLow
+  ) {
+    if (strikeRub == null || pairHigh < strikeRub - 0.5) {
+      priceWithSppWithoutWalletRub = Math.round(pairHigh);
+    }
+  }
+
   return {
     nmId,
     url,
     region,
     priceRegular: priceRegularResolved,
+    oldPriceRub: strikeRub,
     buyerVisiblePriceRub,
     priceWallet: walletConfirmedDom ? walletRubResolved : null,
     showcaseRub: showcaseRubNum,
     walletRub: walletConfirmedDom ? walletRubResolved : null,
     nonWalletRub: null,
+    priceWithSppWithoutWalletRub,
     walletConfirmed: walletConfirmedDom,
     walletEvidence: walletConfirmedDom ? walletEvidence : null,
     walletLabel: walletRubResolved != null ? dom.walletLabel : null,
@@ -2487,7 +2513,7 @@ async function scrapeWalletPriceOnPage(
       showcaseRubFromCardApi: cardRubFromPageNetwork,
       showcaseRubFromDom,
       showcasePriceRub: result.showcaseRubEffective ?? showcaseRubFromDom ?? null,
-      priceWithSppWithoutWalletRub: null,
+      priceWithSppWithoutWalletRub: result.priceWithSppWithoutWalletRub ?? null,
       verificationMethod: buyerPriceVerification.verificationMethod,
       verificationStatus: buyerPriceVerification.verificationStatus,
       verificationReason: buyerPriceVerification.verificationReason,
@@ -2811,6 +2837,15 @@ export async function getWbWalletPrice(input: WalletParserInput): Promise<Wallet
   return runExclusiveBuyerChromeProfile(() => getWbWalletPriceUnlocked(input));
 }
 
+function attachRegionDestMeta(input: WalletParserInput, r: WalletParserResult): WalletParserResult {
+  const destStr = input.region?.trim() || env.REPRICER_WALLET_DEST.trim() || null;
+  return {
+    ...r,
+    regionLabel: regionLabelForDest(destStr),
+    destRequested: destStr,
+  };
+}
+
 async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<WalletParserResult> {
   const networkUrls = new Set<string>();
 
@@ -2941,7 +2976,7 @@ async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<Walle
         popup: { popupOpened: false, walletRub: null, withoutWalletRub: null },
         final: merged,
       });
-      return { ...merged, priceParseSource };
+      return attachRegionDestMeta(input, { ...merged, priceParseSource });
     }
     const finalizedDom = finalizeRepricerPriceSemantics(dom, null);
     const priceParseSource = inferWalletPriceParseSource({
@@ -2949,7 +2984,7 @@ async function getWbWalletPriceUnlocked(input: WalletParserInput): Promise<Walle
       popup: { popupOpened: false, walletRub: null, withoutWalletRub: null },
       final: finalizedDom,
     });
-    return { ...finalizedDom, priceParseSource };
+    return attachRegionDestMeta(input, { ...finalizedDom, priceParseSource });
   } finally {
     await context.close();
   }

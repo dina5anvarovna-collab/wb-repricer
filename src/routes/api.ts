@@ -74,12 +74,16 @@ import {
   recordBrowserParseProbe,
 } from "../lib/browserParseProbeState.js";
 import { checkBuyerSession } from "../lib/buyerSessionCheck.js";
-import { normalizeParseProbePriceFields } from "../lib/parseProbeApiNormalization.js";
+import {
+  normalizeParseProbePriceFields,
+  buildParseProbeDiagnostics,
+} from "../lib/parseProbeApiNormalization.js";
 import {
   buildBuyerSideFromWalletParserLike,
   buildSellerSideFromWbProduct,
   buildUnifiedObservation,
   EMPTY_SELLER_SIDE,
+  destStringToNumber,
 } from "../lib/unifiedPriceModel.js";
 import { resolveWbBrowserHeadless } from "../lib/wbBrowserEnv.js";
 import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
@@ -95,8 +99,18 @@ async function unifiedPriceObservationForProbe(nmId: number, result: WalletParse
     select: { sellerPrice: true, sellerDiscount: true, discountedPriceRub: true },
   });
   const buyer = buildBuyerSideFromWalletParserLike(result);
-  if (!p) return buildUnifiedObservation(EMPTY_SELLER_SIDE, buyer);
-  return buildUnifiedObservation(buildSellerSideFromWbProduct(p), buyer);
+  const meta = {
+    region: result.regionLabel ?? null,
+    dest: destStringToNumber(result.destRequested),
+  };
+  if (!p) return buildUnifiedObservation(EMPTY_SELLER_SIDE, buyer, meta);
+  return buildUnifiedObservation(buildSellerSideFromWbProduct(p), buyer, meta);
+}
+
+function normalizeProbeDestFromBody(raw: unknown): string | undefined {
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  const s = typeof raw === "number" ? String(raw) : String(raw).trim();
+  return s === "" ? undefined : s;
 }
 
 function parseQueryLimit(raw: string | undefined, fallback: number, cap: number): number {
@@ -365,12 +379,15 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /** Пробный парсинг одной карточки тем же пайплайном, что мониторинг (public + card по .env). */
-  app.post<{ Body: { nmId?: number } }>("/api/settings/parse-probe-public", async (req, reply) => {
+  app.post<{ Body: { nmId?: number; dest?: number | string } }>("/api/settings/parse-probe-public", async (req, reply) => {
     const raw = req.body?.nmId;
     const nmId = typeof raw === "number" ? raw : Number(raw);
     if (!Number.isFinite(nmId) || nmId < 1) {
       return reply.code(400).send({ error: "Укажите nmId в JSON: { \"nmId\": 123 }" });
     }
+    const destStr =
+      normalizeProbeDestFromBody(req.body?.dest) ||
+      (env.REPRICER_WALLET_DEST.trim() || undefined);
     const spp =
       !isBuyerAuthDisabled() &&
       !(
@@ -392,6 +409,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         browser: resolveWalletDomBrowserKind(),
         fetchShowcaseWithCookies: spp,
         applyPublicBrowserEnv: isBuyerAuthDisabled(),
+        ...(destStr ? { region: destStr } : {}),
         ...(isBuyerAuthDisabled()
           ? { headless: undefined }
           : { headless: true }),
@@ -434,6 +452,8 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         blockReason: result.blockReason ?? null,
         priceParseSource: result.priceParseSource ?? null,
         nmId: result.nmId,
+        region: result.regionLabel ?? null,
+        dest: destStringToNumber(result.destRequested),
         priceRegular: result.priceRegular ?? null,
         showcaseRub: result.showcaseRub ?? result.showcaseRubEffective ?? null,
         walletRub: result.walletRub ?? null,
@@ -447,6 +467,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         confidence: result.sourceConfidence,
         debugArtifactPaths: result.debugArtifactPaths ?? [],
         attemptCount,
+        diagnostics: buildParseProbeDiagnostics(result),
         unifiedPrice,
         raw: result,
       };
@@ -462,15 +483,20 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /** Проба карточки persistent buyer-профилем (основной контур wallet DOM). */
-  app.post<{ Body: { nmId?: number } }>("/api/settings/parse-probe-browser", async (req, reply) => {
+  app.post<{ Body: { nmId?: number; dest?: number | string } }>("/api/settings/parse-probe-browser", async (req, reply) => {
     if (isBuyerAuthDisabled()) {
       return reply.code(410).send(buyerAuthDisabledBody());
     }
     const raw = req.body?.nmId;
     const nmId = typeof raw === "number" ? raw : Number(raw);
     if (!Number.isFinite(nmId) || nmId < 1) {
-      return reply.code(400).send({ error: "Укажите nmId в JSON: { \"nmId\": 123 }" });
+      return reply.code(400).send({
+        error: 'Укажите nmId в JSON: { "nmId": 123, "dest": "-1257786" } (dest необязателен — см. REPRICER_WALLET_DEST)',
+      });
     }
+    const destStr =
+      normalizeProbeDestFromBody(req.body?.dest) ||
+      (env.REPRICER_WALLET_DEST.trim() || undefined);
     const probeProfileDir = resolveBuyerProfileDir();
     const spp =
       !(
@@ -486,7 +512,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         browser: resolveWalletDomBrowserKind(),
         fetchShowcaseWithCookies: spp,
         applyPublicBrowserEnv: false,
-        region: env.REPRICER_WALLET_DEST.trim() || undefined,
+        region: destStr,
       });
       const okParse =
         result.parseStatus !== "parse_failed" &&
@@ -514,6 +540,8 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         blockReason: result.blockReason ?? null,
         priceParseSource: result.priceParseSource ?? null,
         nmId: result.nmId,
+        region: result.regionLabel ?? null,
+        dest: destStringToNumber(result.destRequested),
         ...norm,
         showcaseRubEffective: result.showcaseRubEffective ?? null,
         walletHint: result.priceWallet,
@@ -521,6 +549,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         pageTitle: result.pageTitle ?? null,
         confidence: result.sourceConfidence,
         debugArtifactPaths: result.debugArtifactPaths ?? [],
+        diagnostics: buildParseProbeDiagnostics(result),
         unifiedPrice,
         raw: result,
       };

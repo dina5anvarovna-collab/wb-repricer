@@ -43,6 +43,7 @@ import {
 import {
   buildSellerSideFromWbProduct,
   buildUnifiedObservation,
+  destStringToNumber,
   toUnifiedRub,
 } from "../../lib/unifiedPriceModel.js";
 
@@ -534,12 +535,19 @@ export async function runPriceMonitorJob(opts: {
         dom.walletConfirmed === true && dom.walletRub != null && Number.isFinite(dom.walletRub) && dom.walletRub > 0
           ? Math.round(dom.walletRub)
           : null;
-      const unifiedPrice = buildUnifiedObservation(buildSellerSideFromWbProduct(p), {
-        showcaseRub: toUnifiedRub(showcaseRub),
-        walletRub: toUnifiedRub(confirmedWalletRub),
-        nonWalletRub: toUnifiedRub(priceWithoutWalletRub),
-        priceRegular: toUnifiedRub(dom.priceRegular ?? null),
-      });
+      const unifiedPrice = buildUnifiedObservation(
+        buildSellerSideFromWbProduct(p),
+        {
+          showcaseRub: toUnifiedRub(showcaseRub),
+          walletRub: toUnifiedRub(confirmedWalletRub),
+          nonWalletRub: toUnifiedRub(priceWithoutWalletRub),
+          priceRegular: toUnifiedRub(dom.priceRegular ?? null),
+        },
+        {
+          region: regionLabelForDest(destKey),
+          dest: destStringToNumber(destKey),
+        },
+      );
       const detailJson = JSON.stringify({
         unifiedPrice,
         parseStatus,

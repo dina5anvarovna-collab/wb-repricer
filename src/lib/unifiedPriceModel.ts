@@ -17,6 +17,10 @@ export type BuyerSidePricesJson = {
 
 /** Одновременно seller-side и buyer-side для API / snapshot / audit. */
 export type UnifiedPriceObservationJson = {
+  /** Подпись региона (справочник wb-regions.json), если известна. */
+  region?: string | null;
+  /** Warehouse `dest` как число (часто отрицательное, напр. -1257786). */
+  dest?: number | null;
   seller: SellerSidePricesJson;
   buyer: BuyerSidePricesJson;
 };
@@ -83,11 +87,23 @@ export function buildBuyerSideFromWbProductCache(
   };
 }
 
+export function destStringToNumber(s: string | null | undefined): number | null {
+  if (s == null || !String(s).trim()) return null;
+  const n = Number(String(s).trim());
+  return Number.isFinite(n) ? n : null;
+}
+
 export function buildUnifiedObservation(
   seller: SellerSidePricesJson,
   buyer: BuyerSidePricesJson,
+  meta?: { region?: string | null; dest?: number | null },
 ): UnifiedPriceObservationJson {
-  return { seller, buyer };
+  const out: UnifiedPriceObservationJson = { seller, buyer };
+  if (meta) {
+    if (meta.region !== undefined) out.region = meta.region;
+    if (meta.dest !== undefined) out.dest = meta.dest;
+  }
+  return out;
 }
 
 export function buildUnifiedFromProductAndSnapshot(

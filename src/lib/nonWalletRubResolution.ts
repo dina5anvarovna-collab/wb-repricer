@@ -43,7 +43,21 @@ export function resolveNonWalletRubDetailed(
 
   const tries: Array<{ rub: number | null; ev: string; src: string }> = [];
 
-  /** Приоритет: buyer/cookies verification, затем DOM SPP, orchestrator local, card-эвристики. */
+  /**
+   * Приоритет (явный контракт):
+   * 1) priceWithSppWithoutWalletRub — DOM/orchestrator (без popup как основного источника)
+   * 2) buyerPriceVerification.priceWithoutWallet — buyer session / cookies
+   * 3) остальное — card/local/DOM field
+   */
+  const sppDom = toRub(base.priceWithSppWithoutWalletRub);
+  if (sppDom != null) {
+    tries.push({
+      rub: sppDom,
+      ev: "dom_price_with_spp_without_wallet",
+      src: "priceWithSppWithoutWalletRub",
+    });
+  }
+
   const bpvPw = toRub(base.buyerPriceVerification?.priceWithoutWallet);
   if (bpvPw != null) {
     tries.push({
@@ -59,15 +73,6 @@ export function resolveNonWalletRubDetailed(
       rub: vOrb,
       ev: "verified_local_without_wallet",
       src: "orc.verifiedLocalWithoutWalletRub",
-    });
-  }
-
-  const sppDom = toRub(base.priceWithSppWithoutWalletRub);
-  if (sppDom != null) {
-    tries.push({
-      rub: sppDom,
-      ev: "dom_price_with_spp_without_wallet",
-      src: "priceWithSppWithoutWalletRub",
     });
   }
 
