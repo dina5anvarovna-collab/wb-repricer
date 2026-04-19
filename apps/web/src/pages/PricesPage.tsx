@@ -1,6 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../lib/api";
 
+type UnifiedPricePayload = {
+  seller: {
+    sellerPriceRub: number | null;
+    sellerDiscountPct: number | null;
+    sellerDiscountPriceRub: number | null;
+  };
+  buyer: {
+    showcaseRub: number | null;
+    walletRub: number | null;
+    nonWalletRub: number | null;
+    priceRegular: number | null;
+  };
+};
+
 type Row = {
   nmId: number;
   title: string;
@@ -9,6 +23,7 @@ type Row = {
   sellerDiscountPercent: number | null;
   lastBuyerWalletRub: number | null;
   lastBuyerRegularRub: number | null;
+  unified?: UnifiedPricePayload;
   updatedAt: string;
 };
 
@@ -54,16 +69,25 @@ export function PricesPage() {
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{r.price != null ? `${Math.round(r.price)}` : "—"}</td>
                 <td className="px-3 py-2 text-right tabular-nums">
-                  {r.discountedPrice != null ? `${Math.round(r.discountedPrice)}` : "—"}
+                  {(() => {
+                    const v = r.unified?.seller?.sellerDiscountPriceRub ?? r.discountedPrice;
+                    return v != null ? `${Math.round(v)}` : "—";
+                  })()}
                 </td>
                 <td className="px-3 py-2 text-right text-[#8b93a7]">
                   {r.sellerDiscountPercent != null ? `${r.sellerDiscountPercent}%` : "—"}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-emerald-200/90">
-                  {r.lastBuyerWalletRub != null ? `${Math.round(r.lastBuyerWalletRub)}` : "—"}
+                  {(() => {
+                    const v = r.unified?.buyer?.walletRub ?? r.lastBuyerWalletRub;
+                    return v != null ? `${Math.round(v)}` : "—";
+                  })()}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums text-[#c4c9d4]">
-                  {r.lastBuyerRegularRub != null ? `${Math.round(r.lastBuyerRegularRub)}` : "—"}
+                  {(() => {
+                    const v = r.unified?.buyer?.nonWalletRub ?? r.lastBuyerRegularRub;
+                    return v != null ? `${Math.round(v)}` : "—";
+                  })()}
                 </td>
               </tr>
             ))}

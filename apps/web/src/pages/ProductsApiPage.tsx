@@ -1,6 +1,20 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../lib/api";
 
+type UnifiedPricePayload = {
+  seller: {
+    sellerPriceRub: number | null;
+    sellerDiscountPct: number | null;
+    sellerDiscountPriceRub: number | null;
+  };
+  buyer: {
+    showcaseRub: number | null;
+    walletRub: number | null;
+    nonWalletRub: number | null;
+    priceRegular: number | null;
+  };
+};
+
 type Item = {
   nmId: number;
   title: string;
@@ -8,6 +22,8 @@ type Item = {
   vendorCode: string | null;
   price: number | null;
   discountedPrice: number | null;
+  sellerDiscountPriceRub?: number | null;
+  unified?: UnifiedPricePayload;
   stocksTotal: number | null;
 };
 
@@ -52,7 +68,13 @@ export function ProductsApiPage() {
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{r.price != null ? Math.round(r.price) : "—"}</td>
                 <td className="px-3 py-2 text-right tabular-nums">
-                  {r.discountedPrice != null ? Math.round(r.discountedPrice) : "—"}
+                  {(() => {
+                    const v =
+                      r.unified?.seller?.sellerDiscountPriceRub ??
+                      r.sellerDiscountPriceRub ??
+                      r.discountedPrice;
+                    return v != null ? Math.round(v) : "—";
+                  })()}
                 </td>
                 <td className="px-3 py-2 text-right tabular-nums">{r.stocksTotal ?? "—"}</td>
               </tr>

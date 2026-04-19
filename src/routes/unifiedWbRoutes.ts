@@ -24,6 +24,11 @@ import {
   headedBrowserLoginEnvironmentOk,
 } from "../modules/buyerSession/buyerSessionManager.js";
 import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
+import {
+  buildUnifiedObservation,
+  buildSellerSideFromWbProduct,
+  buildBuyerSideFromWbProductCache,
+} from "../lib/unifiedPriceModel.js";
 
 function parseLimit(raw: string | undefined, def: number, cap: number): number {
   const n = Number(raw);
@@ -219,10 +224,13 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
         nmId: true,
         title: true,
         sellerPrice: true,
-        discountedPriceRub: true,
         sellerDiscount: true,
+        discountedPriceRub: true,
         lastWalletObservedRub: true,
         lastRegularObservedRub: true,
+        lastKnownShowcaseRub: true,
+        lastKnownWalletRub: true,
+        lastPriceRegularObservedRub: true,
         updatedAt: true,
       },
     });
@@ -232,9 +240,13 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
         title: r.title,
         price: r.sellerPrice,
         discountedPrice: r.discountedPriceRub,
+        sellerPriceRub: r.sellerPrice,
+        sellerDiscountPct: r.sellerDiscount,
+        sellerDiscountPriceRub: r.discountedPriceRub,
         sellerDiscountPercent: r.sellerDiscount,
         lastBuyerWalletRub: r.lastWalletObservedRub,
         lastBuyerRegularRub: r.lastRegularObservedRub,
+        unified: buildUnifiedObservation(buildSellerSideFromWbProduct(r), buildBuyerSideFromWbProductCache(r)),
         updatedAt: r.updatedAt.toISOString(),
       })),
     };
@@ -253,6 +265,11 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
         sellerPrice: true,
         discountedPriceRub: true,
         sellerDiscount: true,
+        lastWalletObservedRub: true,
+        lastRegularObservedRub: true,
+        lastKnownShowcaseRub: true,
+        lastKnownWalletRub: true,
+        lastPriceRegularObservedRub: true,
         updatedAt: true,
       },
     });
@@ -262,7 +279,11 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
         title: r.title,
         basePrice: r.sellerPrice,
         discountedPrice: r.discountedPriceRub,
+        sellerPriceRub: r.sellerPrice,
+        sellerDiscountPct: r.sellerDiscount,
+        sellerDiscountPriceRub: r.discountedPriceRub,
         discountPercent: r.sellerDiscount,
+        unified: buildUnifiedObservation(buildSellerSideFromWbProduct(r), buildBuyerSideFromWbProductCache(r)),
         updatedAt: r.updatedAt.toISOString(),
       })),
     };

@@ -46,9 +46,15 @@ model WbProduct {
   brand                String?
   title                String
   subjectName          String?
+  /** Базовая цена товара в кабинете (WB discounts-prices API, руб. до скидки). */
   sellerPrice          Float?
+  /** Процент скидки продавца 0..99 (тот же API). */
   sellerDiscount       Int?
-  /** Цена после обычной скидки (оценка из кабинета: base * (1 - discount/100)) */
+  /**
+   * Итоговая цена со скидкой продавца из Seller API: round(sellerPrice * (1 - sellerDiscount/100)).
+   * Не путать с витриной: walletRub / nonWalletRub / priceRegular — из buyer/DOM.
+   * Синоним в коде: sellerDiscountPriceRub.
+   */
   discountedPriceRub   Float?
   stock                Int?
   isActive             Boolean  @default(true)
@@ -63,6 +69,8 @@ model WbProduct {
   lastWalletObservedRub      Float?
   /** Последняя «цена с СПП без кошелька», если отличалась от кошелька */
   lastRegularObservedRub     Float?
+  /** Зачёркнутая / старая цена с витрины (последний успешный DOM, основной регион) */
+  lastPriceRegularObservedRub  Float?
   lastParseConfidence        Float?
   /** loaded_showcase_only | loaded_wallet_confirmed | loaded_no_price | parse_failed | auth_required | blocked_or_captcha | unavailable */
   lastWalletParseStatus      String?
@@ -125,6 +133,7 @@ model ProductPriceRecord {
   productId        String
   nmId             Int
   sellerPrice      Float?
+  /** Копия discountedPriceRub с момента записи (Seller API / синхронизация). */
   discountedPrice  Float?
   buyerFinalRub    Float?
   sppPercent       Float?
@@ -236,6 +245,8 @@ model PriceSnapshot {
   productId          String
   nmId               Int
   sellerPrice        Float?
+  /** Процент скидки продавца с кабинета на момент снимка (как WbProduct.sellerDiscount). */
+  sellerDiscountPctSnapshot   Int?
   /** Зачёркнутая / большая справочная цена на карточке */
   priceRegular       Float?
   /** Основная витринная цена (первым видит покупатель) — дублирует смысл buyerWalletPrice для явных выгрузок */
@@ -250,7 +261,7 @@ model PriceSnapshot {
   buyerWalletPrice   Float?
   walletConfirmed    Boolean  @default(false)
   walletEvidence     String?
-  /** Оценка цены со скидкой продавца на момент снимка (из кабинета) */
+  /** Копия WbProduct.discountedPriceRub (Seller API) на момент снимка; не витрина. */
   sellerDiscountedSnapshotRub Float?
   walletSource       String   @default("unavailable") // dom | unavailable
   fixedTargetPrice   Float?

@@ -75,12 +75,29 @@ import {
 } from "../lib/browserParseProbeState.js";
 import { checkBuyerSession } from "../lib/buyerSessionCheck.js";
 import { normalizeParseProbePriceFields } from "../lib/parseProbeApiNormalization.js";
+import {
+  buildBuyerSideFromWalletParserLike,
+  buildSellerSideFromWbProduct,
+  buildUnifiedObservation,
+  EMPTY_SELLER_SIDE,
+} from "../lib/unifiedPriceModel.js";
 import { resolveWbBrowserHeadless } from "../lib/wbBrowserEnv.js";
 import { isBuyerAuthDisabled, isPublicOnlyWalletParse } from "../lib/repricerMode.js";
 import {
   createEphemeralWalletProfileDir,
   removeEphemeralWalletProfileDir,
 } from "../lib/ephemeralWalletProfile.js";
+import type { WalletParserResult } from "../walletDom/wbWalletPriceParser.js";
+
+async function unifiedPriceObservationForProbe(nmId: number, result: WalletParserResult) {
+  const p = await prisma.wbProduct.findFirst({
+    where: { nmId },
+    select: { sellerPrice: true, sellerDiscount: true, discountedPriceRub: true },
+  });
+  const buyer = buildBuyerSideFromWalletParserLike(result);
+  if (!p) return buildUnifiedObservation(EMPTY_SELLER_SIDE, buyer);
+  return buildUnifiedObservation(buildSellerSideFromWbProduct(p), buyer);
+}
 
 function parseQueryLimit(raw: string | undefined, fallback: number, cap: number): number {
   const n = Number(raw);
@@ -409,6 +426,8 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         debugArtifactPaths: result.debugArtifactPaths ?? [],
       });
 
+      const unifiedPrice = await unifiedPriceObservationForProbe(nmId, result);
+
       return {
         ok: okParse,
         parseStatus: result.parseStatus,
@@ -428,6 +447,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         confidence: result.sourceConfidence,
         debugArtifactPaths: result.debugArtifactPaths ?? [],
         attemptCount,
+        unifiedPrice,
         raw: result,
       };
     } catch (e) {
@@ -487,6 +507,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       });
       logger.info({ nmId, tag: "parse-probe-browser", ok: okParse }, "browser wallet probe done");
       const norm = normalizeParseProbePriceFields(result);
+      const unifiedPrice = await unifiedPriceObservationForProbe(nmId, result);
       return {
         ok: okParse,
         parseStatus: result.parseStatus,
@@ -500,6 +521,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
         pageTitle: result.pageTitle ?? null,
         confidence: result.sourceConfidence,
         debugArtifactPaths: result.debugArtifactPaths ?? [],
+        unifiedPrice,
         raw: result,
       };
     } catch (e) {

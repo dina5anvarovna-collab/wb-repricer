@@ -42,8 +42,7 @@ export async function getWbWalletPriceWithPublicRetries(
       const ok =
         one.parseStatus !== "parse_failed" &&
         one.parseStatus !== "auth_required" &&
-        one.parseStatus !== "blocked_or_captcha" &&
-        one.parseStatus !== "loaded_no_price";
+        one.parseStatus !== "blocked_or_captcha";
 
       logger.info(
         {
@@ -94,7 +93,7 @@ export async function getWbWalletPriceWithPublicRetries(
         url: "",
         region: input.region ?? null,
         priceRegular: null,
-        discountedPrice: null,
+        buyerVisiblePriceRub: null,
         priceWallet: null,
         walletLabel: null,
         walletDiscountText: null,

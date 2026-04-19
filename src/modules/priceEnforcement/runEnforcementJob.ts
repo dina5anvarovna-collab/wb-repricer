@@ -21,6 +21,7 @@ import {
 } from "../wbSellerApi/client.js";
 import { computeProtectionRaise, type RoundingMode } from "../priceProtection/engine.js";
 import { ReasonCode } from "../priceProtection/reasonCodes.js";
+import { buildUnifiedFromProductAndSnapshot } from "../../lib/unifiedPriceModel.js";
 
 const BATCH_PAUSE_MS = 650;
 
@@ -279,9 +280,9 @@ export async function runEnforcementJob(opts: {
       const enforceDest = opts.regionDest?.trim() ?? "";
       const primarySnap =
         enforceDest.length > 0
-          ? latestPerDest.find((s) => (s.regionDest ?? "").trim() === enforceDest) ?? latestPerDest[0]
-          : latestPerDest[0];
-      const observedRegular = primarySnap?.buyerRegularPrice ?? null;
+          ? latestPerDest.find((s) => (s.regionDest ?? "").trim() === enforceDest) ?? latestPerDest[0]!
+          : latestPerDest[0]!;
+      const observedRegular = primarySnap.buyerRegularPrice ?? null;
 
       if (!allowsProtectiveAction(numericConf)) {
         await writeAuditLog({
@@ -456,6 +457,11 @@ export async function runEnforcementJob(opts: {
         parseSourceHint: parseSnapshotDetailJson(primarySnap.detailJson).priceParseSource ?? null,
         thresholdDecrease: THRESHOLD_DECREASE,
         thresholdProtective: THRESHOLD_PROTECTIVE,
+        unifiedPrice: buildUnifiedFromProductAndSnapshot(p, primarySnap),
+        sellerDiscountPriceRub: p.discountedPriceRub ?? null,
+        buyerWalletRubSnapshot: primarySnap.walletRub ?? null,
+        buyerNonWalletRubSnapshot: primarySnap.nonWalletRub ?? primarySnap.buyerRegularPrice ?? null,
+        buyerPriceRegularSnapshot: primarySnap.priceRegular ?? null,
       };
 
       if (eng.action === "no_change" || eng.action === "skip") {

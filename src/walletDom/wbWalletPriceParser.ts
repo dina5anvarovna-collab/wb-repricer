@@ -466,8 +466,11 @@ export type WalletParserResult = {
   region: string | null;
   /** Зачёркнутая / большая справочная цена на карточке. */
   priceRegular: number | null;
-  /** Цена со скидкой продавца на витрине (если отличима от кошелька) */
-  discountedPrice: number | null;
+  /**
+   * DOM: зачёркнутая / «старая» линия, если она выше линии кошелька (см. priceRegular). Не Seller API.
+   * Не путать с WbProduct.discountedPriceRub (sellerDiscountPriceRub).
+   */
+  buyerVisiblePriceRub: number | null;
   /** @deprecated см. walletRub — подтверждённая цена WB Кошелька */
   priceWallet: number | null;
   /** Основная витринная цена (то, что покупатель видит первым; почти всегда сценарий с Кошельком). */
@@ -882,7 +885,7 @@ function buildWalletResult(input: {
 
   const walletConfirmedDom = walletRubResolved != null;
 
-  const discountedPrice =
+  const buyerVisiblePriceRub =
     walletRubResolved != null &&
     dom.regularPrice != null &&
     dom.regularPrice > walletRubResolved
@@ -894,7 +897,7 @@ function buildWalletResult(input: {
     url,
     region,
     priceRegular: priceRegularResolved,
-    discountedPrice,
+    buyerVisiblePriceRub,
     priceWallet: walletConfirmedDom ? walletRubResolved : null,
     showcaseRub: showcaseRubNum,
     walletRub: walletConfirmedDom ? walletRubResolved : null,
@@ -2307,8 +2310,8 @@ async function scrapeWalletPriceOnPage(
         nmId,
         url,
         region: input.region ?? null,
-        priceRegular: null,
-        discountedPrice: null,
+    priceRegular: null,
+    buyerVisiblePriceRub: null,
         priceWallet: null,
         walletLabel: null,
         walletDiscountText: null,
@@ -3258,8 +3261,8 @@ async function getWbWalletPriceBatchUnlocked(
           nmId,
           url,
           region: merged.region ?? null,
-          priceRegular: null,
-          discountedPrice: null,
+    priceRegular: null,
+    buyerVisiblePriceRub: null,
           priceWallet: null,
           walletLabel: null,
           walletDiscountText: null,

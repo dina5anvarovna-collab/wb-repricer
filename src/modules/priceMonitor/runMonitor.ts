@@ -40,6 +40,11 @@ import {
   randomPublicJitterWaitMs,
   resolvePublicBrowserHeadless,
 } from "../../lib/publicBrowserRuntime.js";
+import {
+  buildSellerSideFromWbProduct,
+  buildUnifiedObservation,
+  toUnifiedRub,
+} from "../../lib/unifiedPriceModel.js";
 
 const EVAL_TOL_RUB = 3;
 
@@ -58,7 +63,7 @@ function makeSyntheticWalletFailure(
     url: `https://www.wildberries.ru/catalog/${nmId}/detail.aspx`,
     region,
     priceRegular: null,
-    discountedPrice: null,
+    buyerVisiblePriceRub: null,
     priceWallet: null,
     walletLabel: null,
     walletDiscountText: null,
@@ -525,7 +530,18 @@ export async function runPriceMonitorJob(opts: {
 
       const sellerBasePriceRub =
         p.sellerPrice != null && Number.isFinite(p.sellerPrice) ? Math.round(p.sellerPrice) : null;
+      const confirmedWalletRub =
+        dom.walletConfirmed === true && dom.walletRub != null && Number.isFinite(dom.walletRub) && dom.walletRub > 0
+          ? Math.round(dom.walletRub)
+          : null;
+      const unifiedPrice = buildUnifiedObservation(buildSellerSideFromWbProduct(p), {
+        showcaseRub: toUnifiedRub(showcaseRub),
+        walletRub: toUnifiedRub(confirmedWalletRub),
+        nonWalletRub: toUnifiedRub(priceWithoutWalletRub),
+        priceRegular: toUnifiedRub(dom.priceRegular ?? null),
+      });
       const detailJson = JSON.stringify({
+        unifiedPrice,
         parseStatus,
         parseMethod,
         monitorParseContour: contourEff,
@@ -622,16 +638,12 @@ export async function runPriceMonitorJob(opts: {
         parserNonWalletRub: dom.nonWalletRub ?? null,
       });
 
-      const confirmedWalletRub =
-        dom.walletConfirmed === true && dom.walletRub != null && Number.isFinite(dom.walletRub) && dom.walletRub > 0
-          ? Math.round(dom.walletRub)
-          : null;
-
       await prisma.priceSnapshot.create({
         data: {
           productId: p.id,
           nmId: p.nmId,
           sellerPrice: p.sellerPrice,
+          sellerDiscountPctSnapshot: p.sellerDiscount ?? null,
           priceRegular: dom.priceRegular ?? null,
           showcaseRub,
           walletRub: confirmedWalletRub,
@@ -712,6 +724,11 @@ export async function runPriceMonitorJob(opts: {
               : {}),
             ...(priceWithoutWalletRub != null && priceWithoutWalletRub > 0
               ? { lastRegularObservedRub: priceWithoutWalletRub }
+              : {}),
+            ...(dom.priceRegular != null &&
+            Number.isFinite(dom.priceRegular) &&
+            dom.priceRegular > 0
+              ? { lastPriceRegularObservedRub: Math.round(dom.priceRegular) }
               : {}),
           },
         });

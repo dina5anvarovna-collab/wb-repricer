@@ -34,7 +34,8 @@ export type BuyerDomResult = {
   walletConfirmed?: boolean | null;
   walletEvidence?: WalletEvidenceKind | null;
   walletEvidenceLayers?: WalletEvidenceKind[] | null;
-  priceDiscounted: number | null;
+  /** См. WalletParserResult.buyerVisiblePriceRub (DOM, не Seller API). */
+  buyerVisiblePriceRub: number | null;
   priceWallet: number | null;
   walletLabel: string | null;
   walletDiscountText: string | null;
@@ -227,7 +228,12 @@ function walletResultFromCliJson(
     walletConfirmed: j.walletConfirmed === true ? true : j.walletConfirmed === false ? false : undefined,
     walletEvidence,
     walletEvidenceLayers,
-    discountedPrice: typeof j.discountedPrice === "number" ? j.discountedPrice : null,
+    buyerVisiblePriceRub:
+      typeof j.buyerVisiblePriceRub === "number"
+        ? j.buyerVisiblePriceRub
+        : typeof j.discountedPrice === "number"
+          ? j.discountedPrice
+          : null,
     priceWallet: typeof j.priceWallet === "number" ? j.priceWallet : null,
     walletLabel: typeof j.walletLabel === "string" ? j.walletLabel : null,
     walletDiscountText: typeof j.walletDiscountText === "string" ? j.walletDiscountText : null,
@@ -360,7 +366,7 @@ export function walletParserResultToBuyerDom(r: WalletParserResult): BuyerDomRes
     walletConfirmed: typeof r.walletConfirmed === "boolean" ? r.walletConfirmed : null,
     walletEvidence: r.walletEvidence ?? null,
     walletEvidenceLayers: r.walletEvidenceLayers ?? null,
-    priceDiscounted: r.discountedPrice,
+    buyerVisiblePriceRub: r.buyerVisiblePriceRub,
     priceWallet: r.priceWallet,
     walletLabel: r.walletLabel,
     walletDiscountText: r.walletDiscountText,
@@ -486,7 +492,7 @@ export async function getBuyerDisplayedPrice(opts: {
       url: `https://www.wildberries.ru/catalog/${opts.nmId}/detail.aspx`,
       region: dest,
       priceRegular: null,
-      priceDiscounted: null,
+      buyerVisiblePriceRub: null,
       priceWallet: null,
       walletLabel: null,
       walletDiscountText: null,
@@ -513,7 +519,7 @@ export async function getBuyerDisplayedPrice(opts: {
         url: `https://www.wildberries.ru/catalog/${opts.nmId}/detail.aspx`,
         region: dest,
         priceRegular: null,
-        priceDiscounted: null,
+        buyerVisiblePriceRub: null,
         priceWallet: null,
         walletLabel: null,
         walletDiscountText: null,
@@ -540,7 +546,7 @@ export async function getBuyerDisplayedPrice(opts: {
         url: `https://www.wildberries.ru/catalog/${opts.nmId}/detail.aspx`,
         region: dest,
         priceRegular: null,
-        priceDiscounted: null,
+        buyerVisiblePriceRub: null,
         priceWallet: null,
         walletLabel: null,
         walletDiscountText: null,
@@ -561,7 +567,7 @@ export async function getBuyerDisplayedPrice(opts: {
           url: `https://www.wildberries.ru/catalog/${opts.nmId}/detail.aspx`,
           region: dest,
           priceRegular: null,
-          priceDiscounted: null,
+          buyerVisiblePriceRub: null,
           priceWallet: null,
           walletLabel: null,
           walletDiscountText: null,
@@ -585,7 +591,7 @@ export async function getBuyerDisplayedPrice(opts: {
           url: `https://www.wildberries.ru/catalog/${opts.nmId}/detail.aspx`,
           region: dest,
           priceRegular: null,
-          priceDiscounted: null,
+          buyerVisiblePriceRub: null,
           priceWallet: null,
           walletLabel: null,
           walletDiscountText: null,

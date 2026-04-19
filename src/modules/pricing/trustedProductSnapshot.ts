@@ -7,6 +7,8 @@ export type FrontStatus = "VERIFIED" | "PARTIAL" | "UNVERIFIED";
 export type SellerSnapshot = {
   nmId: number;
   sellerPriceRub: number | null;
+  /** 0..99, тот же смысл, что WbProduct.sellerDiscount. */
+  sellerDiscountPct: number | null;
   sellerDiscountPriceRub: number | null;
   status: "ok" | "missing";
   error: string | null;
@@ -31,6 +33,7 @@ export type BuyerRegionalSnapshot = {
 export type TrustedProductSnapshot = {
   nmId: number;
   sellerPriceRub: number | null;
+  sellerDiscountPct: number | null;
   sellerDiscountPriceRub: number | null;
   aggregatedSppRub: number | null;
   aggregatedShowcaseWithWalletRub: number | null;
@@ -70,9 +73,13 @@ function parseDetailJson(raw: string | null | undefined): Record<string, unknown
 export function buildSellerSnapshotFromProduct(p: WbProduct): SellerSnapshot {
   const sellerPriceRub = toRub(p.sellerPrice);
   const sellerDiscountPriceRub = toRub(p.discountedPriceRub);
+  const d = p.sellerDiscount;
+  const sellerDiscountPct =
+    d != null && Number.isFinite(d) && d >= 0 && d < 100 ? Math.round(d) : null;
   return {
     nmId: p.nmId,
     sellerPriceRub,
+    sellerDiscountPct,
     sellerDiscountPriceRub,
     status: sellerPriceRub != null || sellerDiscountPriceRub != null ? "ok" : "missing",
     error: sellerPriceRub != null || sellerDiscountPriceRub != null ? null : "seller_api_missing_prices",
@@ -207,6 +214,7 @@ export function aggregateTrustedProductSnapshot(input: {
   return {
     nmId: input.nmId,
     sellerPriceRub: input.seller.sellerPriceRub,
+    sellerDiscountPct: input.seller.sellerDiscountPct,
     sellerDiscountPriceRub: input.seller.sellerDiscountPriceRub,
     aggregatedSppRub,
     aggregatedShowcaseWithWalletRub,

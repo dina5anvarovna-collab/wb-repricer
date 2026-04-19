@@ -17,7 +17,7 @@ export type WalletDomParseLike = {
   /** Подтверждение применения региона (не только URL). */
   regionConfirmed?: boolean | null;
   /** Цена со скидкой продавца на витрине (debug only; не источник кошелька). */
-  discountedPrice?: number | null;
+  buyerVisiblePriceRub?: number | null;
   parseStatus: string;
   buyerPriceVerification?: {
     verificationStatus?: "VERIFIED" | "UNVERIFIED";
