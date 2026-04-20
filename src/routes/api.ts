@@ -58,6 +58,7 @@ import {
 import { registerUnifiedWbRoutes } from "./unifiedWbRoutes.js";
 import { normalizeWbProductFromDb } from "../modules/wbData/normalizeProduct.js";
 import {
+  getBuyerSessionDebugSnapshot,
   headedBrowserLoginBlockedMessage,
   headedBrowserLoginEnvironmentOk,
   importBuyerBrowserProfileArchive,
@@ -255,7 +256,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       data: {
         profileDir,
         isAuthorized: false,
-        status: "pending_login",
+        status: "needs_reauth",
         lastProbeOk: false,
         notes: JSON.stringify({ phase: "awaiting_cli_login" }),
       },
@@ -355,6 +356,14 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ ok: false, error: result.message });
     }
     return { ok: true, message: result.message };
+  });
+
+  app.get("/api/debug/buyer-session", async () => {
+    const snapshot = await getBuyerSessionDebugSnapshot();
+    return {
+      ok: true,
+      data: snapshot,
+    };
   });
 
   /** ZIP архива каталога Chromium `.wb-browser-profile` (локальный логин + загрузка на VPS). */

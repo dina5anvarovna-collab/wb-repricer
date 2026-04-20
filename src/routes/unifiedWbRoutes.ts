@@ -65,6 +65,27 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
           ? !cookieAlive
           : true;
     let message: string | null = null;
+    const latestSnapshot = await prisma.priceSnapshot.findFirst({
+      orderBy: { parsedAt: "desc" },
+      select: { walletParseStatus: true, detailJson: true },
+    });
+    let statusHint: "CAPTCHA_HOLD" | "STALE_SESSION" | "USING_LAST_GOOD" | "OK" = "OK";
+    let detail: Record<string, unknown> = {};
+    if (latestSnapshot?.detailJson) {
+      try {
+        detail = JSON.parse(latestSnapshot.detailJson) as Record<string, unknown>;
+      } catch {
+        detail = {};
+      }
+    }
+    const parseStatus = latestSnapshot?.walletParseStatus ?? null;
+    if (parseStatus === "blocked_or_captcha" || parseStatus === "captcha") {
+      statusHint = "CAPTCHA_HOLD";
+    } else if (parseStatus === "auth_required" || detail.sessionStatus === "stale") {
+      statusHint = "STALE_SESSION";
+    } else if (detail.usedLastGoodFallback === true || detail.safeMode === true) {
+      statusHint = "USING_LAST_GOOD";
+    }
     if (!tokenAlive && auth) {
       message = "Сессия Seller API (токен) отклонена WB — обновите токен в «Подключение WB».";
     } else if (buyerAuthDisabled) {
@@ -101,6 +122,7 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
             : !["0", "false", "no", "off"].includes(env.REPRICER_MONITOR_SPP_VIA_COOKIES.trim().toLowerCase()),
       },
       needsBuyerLogin,
+      statusHint,
       message,
     };
   });

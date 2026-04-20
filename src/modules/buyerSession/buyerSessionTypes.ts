@@ -8,13 +8,18 @@ export type BuyerProbeResult = {
   showcaseHttpStatus?: number;
 };
 
+export enum BuyerSessionStatus {
+  FRESH = "fresh",
+  STALE = "stale",
+  INVALID = "invalid",
+  NEEDS_REAUTH = "needs_reauth",
+  DISABLED = "disabled",
+}
+
 /** Статус buyer auth в UI / API (канон — persistent profile + probe). */
 export type BuyerAuthCanonicalStatus =
-  | "unknown"
-  | "pending_login"
-  | "active"
-  | "expired"
-  | "invalid";
+  | BuyerSessionStatus
+  | "unknown";
 
 /** Насколько можно доверять cookie header без повторного probe. */
 export type BuyerCookieValidation = "fresh" | "stale" | "none";

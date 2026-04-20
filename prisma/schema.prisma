@@ -7,6 +7,19 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model AdminSession {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  ip         String?
+  userAgent  String?
+
+  @@index([expiresAt, revokedAt])
+}
+
 model SellerCabinet {
   id             String   @id @default(cuid())
   name           String   @default("default")

@@ -22,6 +22,8 @@ import {
 import { computeProtectionRaise, type RoundingMode } from "../priceProtection/engine.js";
 import { ReasonCode } from "../priceProtection/reasonCodes.js";
 import { buildUnifiedFromProductAndSnapshot } from "../../lib/unifiedPriceModel.js";
+import { decideRepricing } from "../pricing/decideRepricing.js";
+import type { WalletEvidence } from "../pricing/walletEvidence.js";
 
 const BATCH_PAUSE_MS = 650;
 
@@ -34,7 +36,21 @@ const ROUNDING: RoundingMode[] = [
   "end99",
 ];
 
-const SNAPSHOT_MAX_AGE_H = 24;
+const SNAPSHOT_MAX_AGE_H = env.REPRICER_BUYER_SNAPSHOT_TTL_MINUTES / 60;
+
+function envFlagEnabled(raw: string | undefined, defaultValue: boolean): boolean {
+  const v = raw?.trim().toLowerCase() ?? "";
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  return defaultValue;
+}
+
+export function shouldBlockAutoApplyByBuyerVerification(input: {
+  verificationStatus: string | null | undefined;
+}): boolean {
+  if (!envFlagEnabled(env.REPRICER_REQUIRE_VERIFIED_BUYER_FOR_AUTO_APPLY, true)) return false;
+  return String(input.verificationStatus ?? "") !== "VERIFIED";
+}
 
 function parseSnapshotDetailJson(raw: string | null | undefined): Record<string, unknown> {
   if (!raw) return {};
@@ -43,6 +59,41 @@ function parseSnapshotDetailJson(raw: string | null | undefined): Record<string,
   } catch {
     return {};
   }
+}
+
+function parseWalletEvidence(detail: Record<string, unknown>, snap: PriceSnapshot): WalletEvidence | null {
+  const raw = detail.walletEvidence;
+  if (!raw || typeof raw !== "object") return null;
+  const e = raw as Record<string, unknown>;
+  const parseStatus = e.parseStatus === "success" ? "success" : "unsafe";
+  const sourceConfidence =
+    e.sourceConfidence === "high" || e.sourceConfidence === "medium" || e.sourceConfidence === "low"
+      ? e.sourceConfidence
+      : "low";
+  const level =
+    e.level === "actionable" || e.level === "confirmed" || e.level === "observed"
+      ? e.level
+      : "observed";
+  return {
+    walletRub: typeof e.walletRub === "number" ? e.walletRub : snap.walletRub ?? snap.buyerWalletPrice ?? null,
+    showcaseRub:
+      typeof e.showcaseRub === "number" ? e.showcaseRub : snap.showcaseRub ?? snap.walletRub ?? snap.buyerWalletPrice ?? null,
+    nonWalletRub: typeof e.nonWalletRub === "number" ? e.nonWalletRub : snap.nonWalletRub ?? snap.buyerRegularPrice ?? null,
+    regularRub: typeof e.regularRub === "number" ? e.regularRub : snap.priceRegular ?? null,
+    source:
+      e.source === "dom" || e.source === "modal" || e.source === "cookies" || e.source === "mixed"
+        ? e.source
+        : "unverified",
+    sourceConfidence,
+    confirmed: e.confirmed === true,
+    parseStatus,
+    region: typeof e.region === "string" ? e.region : snap.regionDest ?? null,
+    nmId: typeof e.nmId === "number" ? e.nmId : snap.nmId,
+    observedAt: typeof e.observedAt === "string" ? e.observedAt : snap.parsedAt.toISOString(),
+    conflict: e.conflict === true,
+    level,
+    actionable: e.actionable === true,
+  };
 }
 
 function parseRounding(mode: string | null | undefined): RoundingMode {
@@ -250,6 +301,98 @@ export async function runEnforcementJob(opts: {
         continue;
       }
 
+      const enforceDest = opts.regionDest?.trim() ?? "";
+      const primarySnap =
+        enforceDest.length > 0
+          ? latestPerDest.find((s) => (s.regionDest ?? "").trim() === enforceDest) ?? latestPerDest[0]!
+          : latestPerDest[0]!;
+      const observedRegular = primarySnap.buyerRegularPrice ?? null;
+      const detailPrimary = parseSnapshotDetailJson(primarySnap.detailJson);
+      const verificationStatus =
+        typeof detailPrimary.regionalVerificationStatus === "string"
+          ? detailPrimary.regionalVerificationStatus
+          : typeof (detailPrimary.buyerPriceVerification as { verificationStatus?: unknown } | undefined)?.verificationStatus === "string"
+            ? String((detailPrimary.buyerPriceVerification as { verificationStatus?: string }).verificationStatus)
+            : null;
+      const usingLastGoodSnapshot =
+        detailPrimary.usedLastGoodFallback === true ||
+        detailPrimary.safeMode === true ||
+        String(detailPrimary.lastPriceSource ?? "").toLowerCase() === "last_good";
+      const allowLastGoodAutoApply = envFlagEnabled(env.REPRICER_ALLOW_LASTGOOD_FOR_AUTO_APPLY, false);
+      if (
+        shouldBlockAutoApplyByBuyerVerification({ verificationStatus }) ||
+        (usingLastGoodSnapshot && !allowLastGoodAutoApply)
+      ) {
+        await writeAuditLog({
+          action: "protection.skip",
+          entityType: "WbProduct",
+          entityId: p.id,
+          dryRun: opts.dryRun,
+          meta: {
+            nmId: p.nmId,
+            finalAction: "skipped_safe_hold",
+            status: "safe_hold",
+            reason: shouldBlockAutoApplyByBuyerVerification({ verificationStatus })
+              ? "buyer_not_verified"
+              : "last_good_not_allowed_for_auto_apply",
+            verificationStatus,
+          },
+        });
+        skipped += 1;
+        processed += 1;
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+        continue;
+      }
+      const walletEvidence = parseWalletEvidence(detailPrimary, primarySnap);
+      const sessionStatusRaw = String(detailPrimary.sessionStatus ?? "unknown");
+      const sessionStatus =
+        sessionStatusRaw === "fresh" || sessionStatusRaw === "stale" || sessionStatusRaw === "invalid"
+          ? sessionStatusRaw
+          : "unknown";
+      const stock =
+        String(detailPrimary.stockLevel ?? "IN_STOCK") === "OUT_OF_STOCK" ? "OUT_OF_STOCK" : "IN_STOCK";
+      const decision = decideRepricing({
+        sellerPriceRub: p.sellerPrice ?? null,
+        floorRub: minAllowed,
+        walletEvidence,
+        sessionStatus,
+        stock,
+        freshness: {
+          isFresh: snapshotAgeH <= SNAPSHOT_MAX_AGE_H,
+          ageMinutes: snapshotAgeH * 60,
+        },
+      });
+      if (decision.action !== "enforce_now") {
+        const finalAction =
+          decision.action === "skip_conflict"
+            ? "skipped_conflict"
+            : decision.action === "skip_stale"
+              ? "skipped_no_fresh_wallet_data"
+              : decision.action === "skip_invalid_session"
+                ? "skipped_invalid_session"
+                : decision.action === "skip_out_of_stock"
+                  ? "skipped_out_of_stock"
+                  : "skipped_safe_hold";
+        await writeAuditLog({
+          action: "protection.skip",
+          entityType: "WbProduct",
+          entityId: p.id,
+          dryRun: opts.dryRun,
+          meta: {
+            nmId: p.nmId,
+            finalAction,
+            reason: decision.reason,
+            decision: decision.action,
+            minimumAllowed: minAllowed,
+            safeModeHold: p.safeModeHold,
+          },
+        });
+        skipped += 1;
+        processed += 1;
+        await new Promise((r) => setTimeout(r, BATCH_PAUSE_MS));
+        continue;
+      }
+
       const wallets = latestPerDest
         .map((s) => s.buyerWalletPrice)
         .filter((x): x is number => x != null && Number.isFinite(x) && x > 0);
@@ -276,13 +419,6 @@ export async function runEnforcementJob(opts: {
       const observedWallet = Math.min(...wallets);
       const confidences = latestPerDest.map(snapshotNumericConfidence);
       const numericConf = Math.min(...confidences);
-
-      const enforceDest = opts.regionDest?.trim() ?? "";
-      const primarySnap =
-        enforceDest.length > 0
-          ? latestPerDest.find((s) => (s.regionDest ?? "").trim() === enforceDest) ?? latestPerDest[0]!
-          : latestPerDest[0]!;
-      const observedRegular = primarySnap.buyerRegularPrice ?? null;
 
       if (!allowsProtectiveAction(numericConf)) {
         await writeAuditLog({

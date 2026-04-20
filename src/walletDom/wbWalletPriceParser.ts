@@ -974,7 +974,7 @@ function pickPrimaryWalletEvidence(layers: WalletEvidenceKind[]): WalletEvidence
   return layers[0] ?? null;
 }
 
-function finalizeRepricerPriceSemantics(
+export function finalizeRepricerPriceSemantics(
   base: WalletParserResult,
   orc: ShowcaseOrchestratorResult | null,
 ): WalletParserResult {
@@ -983,18 +983,12 @@ function finalizeRepricerPriceSemantics(
     return Math.round(v);
   };
 
-  const showcaseRub =
-    toRub(base.showcaseRub ?? base.showcaseRubEffective) ??
-    toRub(orc?.effectiveShowcaseRub) ??
-    toRub(base.showcasePriceRub) ??
-    null;
-
-  const walletLineForCross =
-    toRub(base.walletRub) ?? toRub(base.priceWallet) ?? showcaseRub;
+  const walletAcceptedFromDom = toRub(base.walletPriceRubAcceptedFromDom);
+  const walletLineForCross = walletAcceptedFromDom ?? toRub(base.walletRub) ?? toRub(base.priceWallet) ?? null;
   const nwDetail = resolveNonWalletRubDetailed(base, orc, walletLineForCross);
-  const nonWalletRub = nwDetail.nonWalletRub;
+  let nonWalletRub = nwDetail.nonWalletRub;
 
-  let walletRub = toRub(base.walletRub ?? base.priceWallet);
+  let walletRub = walletAcceptedFromDom ?? toRub(base.walletRub ?? base.priceWallet);
   let parseStatus = base.parseStatus;
 
   let layers = mergeWalletEvidenceLayers(base.walletEvidenceLayers, base.walletEvidence);
@@ -1030,8 +1024,23 @@ function finalizeRepricerPriceSemantics(
     }
   }
 
-  if (showcaseRub != null && nonWalletRub != null && showcaseRub < nonWalletRub) {
-    walletRub = showcaseRub;
+  const showcaseFromDom = toRub(base.showcaseRubFromDom);
+  const cardApiShowcase = toRub(base.cardApiShowcaseRub ?? base.showcaseRubFromCardApi ?? base.showcaseApiRub ?? null);
+
+  if (nonWalletRub == null && walletRub != null && showcaseFromDom != null && showcaseFromDom > walletRub) {
+    nonWalletRub = showcaseFromDom;
+  }
+  if (
+    nonWalletRub == null &&
+    walletRub != null &&
+    cardApiShowcase != null &&
+    cardApiShowcase > walletRub &&
+    cardApiShowcase !== walletRub
+  ) {
+    nonWalletRub = cardApiShowcase;
+  }
+
+  if (walletRub != null && nonWalletRub != null && walletRub < nonWalletRub) {
     layers = mergeWalletEvidenceLayers(layers, "showcase_less_than_nonwallet");
     if (!["parse_failed", "blocked_or_captcha", "auth_required", "loaded_no_price"].includes(parseStatus)) {
       parseStatus = "loaded_wallet_confirmed";
@@ -1046,33 +1055,34 @@ function finalizeRepricerPriceSemantics(
       Boolean(base.walletConfirmed) ||
       hasWalletLabel ||
       base.walletIconDetected === true ||
-      (showcaseRub != null && nonWalletRub != null && showcaseRub < nonWalletRub) ||
+      (walletRub != null && nonWalletRub != null && walletRub < nonWalletRub) ||
       (ver?.verificationStatus === "VERIFIED" && ver.trustedSource === "product_page_wallet_selector") ||
       (base.popupOpened === true && popupWalletRub != null));
 
   if (
     !walletConfirmed &&
-    showcaseRub != null &&
+    walletRub != null &&
     !["parse_failed", "blocked_or_captcha", "auth_required", "loaded_no_price"].includes(parseStatus)
   ) {
     parseStatus = "loaded_showcase_only";
   }
 
+  const walletShowcase = walletConfirmed ? walletRub : null;
   return {
     ...base,
-    showcaseRub,
-    showcaseRubEffective: showcaseRub,
+    showcaseRub: walletShowcase,
+    showcaseRubEffective: walletShowcase,
     nonWalletRub,
     nonWalletEvidence: nwDetail.nonWalletEvidence,
     nonWalletSource: nwDetail.nonWalletSource,
     nonWalletFallbackUsed: nwDetail.nonWalletFallbackUsed,
     nonWalletCandidateValues: nwDetail.nonWalletCandidateValues,
-    walletRub: walletConfirmed ? walletRub : null,
+    walletRub: walletShowcase,
     walletConfirmed,
     walletEvidence,
     walletEvidenceLayers: layers.length > 0 ? layers : null,
     parseStatus,
-    priceWallet: walletConfirmed ? walletRub : null,
+    priceWallet: walletShowcase,
   };
 }
 
@@ -2426,6 +2436,7 @@ async function scrapeWalletPriceOnPage(
       result.showcaseRubEffective ?? dom.showcaseWalletPriceCandidate ?? null;
     const walletPriceFromDom =
       result.priceWallet != null && result.priceWallet > 0 ? result.priceWallet : null;
+    const walletCandidateForTruth = walletPriceFromDom ?? showcaseRubFromDom;
     const forensicDecision = {
       nmId,
       rawPriceBlockText: (preDom as any).priceBlockTexts ?? null,
@@ -2435,19 +2446,19 @@ async function scrapeWalletPriceOnPage(
       walletIconFound: preDom.walletIconDetected,
       chosenNodeIndex:
         ((preDom as any).priceNodesDebug as { index: number; parsedNumber: number | null }[] | undefined)?.find(
-          (x) => x.parsedNumber === showcaseRubFromDom,
+          (x) => x.parsedNumber === walletCandidateForTruth,
         )?.index ?? null,
       chosenNodeText:
         ((preDom as any).priceNodesDebug as { innerText: string; parsedNumber: number | null }[] | undefined)?.find(
-          (x) => x.parsedNumber === showcaseRubFromDom,
+          (x) => x.parsedNumber === walletCandidateForTruth,
         )?.innerText ?? null,
-      chosenParsedRub: showcaseRubFromDom,
+      chosenParsedRub: walletCandidateForTruth,
       chosenReason:
         result.parseStatus === "loaded_showcase_only"
           ? "two_tier_showcase_effective"
-          : preDom.walletIconDetected && showcaseRubFromDom != null
+          : preDom.walletIconDetected && walletCandidateForTruth != null
             ? "showcaseWalletPriceCandidate_with_wallet_icon"
-            : showcaseRubFromDom != null
+            : walletCandidateForTruth != null
               ? "showcaseWalletPriceCandidate_no_icon"
               : "no_wallet_candidate",
     };
@@ -2464,10 +2475,10 @@ async function scrapeWalletPriceOnPage(
       {
         tag: "wb-wallet-verify",
         nmId,
-        walletSelectorFound: showcaseRubFromDom != null,
+        walletSelectorFound: walletCandidateForTruth != null,
         walletPriceRubAcceptedFromDom: walletPriceFromDom,
         trustedSource:
-          preDom.walletIconDetected === true && showcaseRubFromDom != null && showcaseRubFromDom > 0
+          preDom.walletIconDetected === true && walletCandidateForTruth != null && walletCandidateForTruth > 0
             ? "product_page_wallet_selector"
             : "none",
         showcaseRubFromDom,
@@ -2507,7 +2518,7 @@ async function scrapeWalletPriceOnPage(
     }
     const buyerPriceVerification = computeBuyerPriceVerification({
       sellerBasePriceRub: null,
-      showcaseWalletPriceCandidate: showcaseRubFromDom,
+      showcaseWalletPriceCandidate: walletCandidateForTruth,
       walletIconDetected: preDom.walletIconDetected,
       cardApiShowcaseRub: cardRubFromPageNetwork,
       cardApiWalletRub: cardWalletRub,

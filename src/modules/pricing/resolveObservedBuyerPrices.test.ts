@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { computeBuyerPriceVerification } from "./buyerPriceVerification.js";
 import { resolveObservedBuyerPrices } from "./resolveObservedBuyerPrices.js";
 import type { BuyerDomResult } from "../wbBuyerDom/runWalletCli.js";
+import { env } from "../../config/env.js";
 
 const DEST = "-1257786";
 
@@ -16,6 +17,8 @@ function fallbackCtx(over?: Partial<Parameters<typeof resolveObservedBuyerPrices
     lastKnownWalletRub: null,
     lastRegularObservedRub: null,
     lastWalletObservedRub: null,
+    walletRubLastGood: null,
+    nonWalletRubLastGood: null,
     ...over,
   };
 }
@@ -147,6 +150,33 @@ describe("resolveObservedBuyerPrices buyer truth pipeline", () => {
     expect(r.buyerPriceVerification.repricingAllowed).toBe(r.repricingAllowed);
   });
 
+  it("prefers walletPriceRubAcceptedFromDom for wallet/showcase and uses showcaseRubFromDom for non-wallet", () => {
+    const dom = strongVerifiedDom();
+    const domExt = dom as BuyerDomResult & {
+      walletPriceRubAcceptedFromDom?: number | null;
+      cardApiShowcaseRub?: number | null;
+    };
+    domExt.walletPriceRubAcceptedFromDom = 1176;
+    dom.showcaseRub = 1200;
+    dom.showcaseRubFromDom = 1200;
+    domExt.cardApiShowcaseRub = 1200;
+    dom.nonWalletRub = 1200;
+    dom.walletRub = 1176;
+    dom.showcaseRubFromCookies = 1200;
+    dom.priceRegular = 1500;
+    const r = resolveObservedBuyerPrices({
+      dom,
+      stockLevel: "IN_STOCK",
+      expectedNmId: 111,
+      expectedDest: DEST,
+      monitorBatchDestCount: 1,
+      fallbackContext: fallbackCtx({ discountedPriceRub: null, sellerPrice: 1500 }),
+    });
+    expect(r.buyerWallet).toBe(1176);
+    expect(r.showcaseRub).toBe(1176);
+    expect(r.priceWithoutWalletRub).toBe(1200);
+  });
+
   it("multi-dest monitor run defers VERIFIED until catalog batch (marks UNVERIFIED per step)", () => {
     const r = resolveObservedBuyerPrices({
       dom: strongVerifiedDom(),
@@ -158,5 +188,40 @@ describe("resolveObservedBuyerPrices buyer truth pipeline", () => {
     });
     expect(r.buyerPriceVerification.verificationStatus).toBe("UNVERIFIED");
     expect(r.repricingAllowed).toBe(false);
+  });
+
+  it("uses last good fallback when current wallet/non-wallet are empty", () => {
+    const dom = {
+      ...strongVerifiedDom(),
+      parseStatus: "loaded_no_price",
+      walletRub: null,
+      priceWallet: null,
+      buyerVisiblePriceRub: null,
+      showcaseRubFromCookies: null,
+      showcaseRubFromDom: null,
+      nonWalletRub: null,
+      buyerPriceVerification: {
+        ...strongVerifiedDom().buyerPriceVerification!,
+        verificationStatus: "UNVERIFIED",
+        verificationMethod: "unverified",
+      },
+    } as BuyerDomResult;
+    const r = resolveObservedBuyerPrices({
+      dom,
+      stockLevel: "IN_STOCK",
+      expectedNmId: 111,
+      expectedDest: DEST,
+      monitorBatchDestCount: 1,
+      fallbackContext: fallbackCtx({
+        discountedPriceRub: null,
+        walletRubLastGood: 1176,
+        nonWalletRubLastGood: 1200,
+      }),
+    });
+    const allow = ["1", "true", "yes", "on"].includes(
+      env.REPRICER_ALLOW_LASTGOOD_FOR_RECOMMENDATION.trim().toLowerCase(),
+    );
+    expect(r.buyerWallet).toBe(allow ? 1176 : null);
+    expect(r.priceWithoutWalletRub).toBe(allow ? 1200 : null);
   });
 });

@@ -30,7 +30,7 @@ export async function buildSellerStatusPayload() {
     }
   }
   const buyer = await prisma.buyerSession.findFirst({
-    where: { isAuthorized: true, status: "active" },
+    where: { isAuthorized: true, status: "fresh" },
     orderBy: { updatedAt: "desc" },
   });
   const products = await prisma.wbProduct.count();

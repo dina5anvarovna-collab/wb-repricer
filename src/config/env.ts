@@ -86,8 +86,10 @@ const schema = z.object({
   REPRICER_MIN_VALID_REGIONS_FOR_ENFORCE: z.coerce.number().int().min(1).max(20).default(1),
   /** Нестабильность цены по региону: max spread по 3 последним снимкам (%). */
   REPRICER_REGION_STABILITY_MAX_SPREAD_PCT: z.coerce.number().min(1).max(100).default(20),
-  /** Пароль для входа в админку (пусто = без auth) */
+  /** Пароль для входа в админку (обязателен для защищённых /api/* роутов) */
   REPRICER_ADMIN_PASSWORD: z.string().optional().default(""),
+  /** TTL admin-сессии в часах (серверная проверка expiresAt) */
+  REPRICER_ADMIN_SESSION_TTL_HOURS: z.coerce.number().int().min(1).max(24 * 90).default(24 * 7),
   /** CORS: через запятую, напр. http://127.0.0.1:5173 (пусто = reflect request origin в dev) */
   REPRICER_CORS_ORIGINS: z.string().optional().default(""),
   /**
@@ -176,6 +178,28 @@ const schema = z.object({
   REPRICER_BUYER_SESSION_WALLET_PROBE: z.string().optional().default("true"),
   /** Cookie header «валиден» после успешного probe не дольше N минут */
   REPRICER_BUYER_SESSION_TTL_MIN: z.coerce.number().min(5).max(240).default(45),
+  /** Допустимая свежесть buyer snapshot для решений/авто-применения (минуты). */
+  REPRICER_BUYER_SNAPSHOT_TTL_MINUTES: z.coerce.number().min(5).max(24 * 60 * 7).default(720),
+  /** TTL для last good buyer-значений (минуты). */
+  REPRICER_BUYER_LASTGOOD_TTL_MINUTES: z.coerce.number().min(5).max(24 * 60 * 14).default(1440),
+  /** HOLD окно после captcha (минуты). */
+  REPRICER_BUYER_CAPTCHA_HOLD_MINUTES: z.coerce.number().min(1).max(24 * 60).default(60),
+  /** HOLD окно после stale/auth проблем (минуты). */
+  REPRICER_BUYER_STALE_HOLD_MINUTES: z.coerce.number().min(1).max(24 * 60 * 3).default(180),
+  /** При ошибках buyer-парса использовать last good как fail-open. */
+  REPRICER_BUYER_FAIL_OPEN_WITH_LASTGOOD: z.string().optional().default("true"),
+  /** Никогда не затирать last good null-значениями. */
+  REPRICER_BUYER_NEVER_OVERWRITE_LASTGOOD_WITH_NULL: z.string().optional().default("true"),
+  /** Блокировать применение новых buyer snapshot при captcha. */
+  REPRICER_BUYER_BLOCK_ON_CAPTCHA: z.string().optional().default("true"),
+  /** Блокировать применение новых buyer snapshot при stale/auth_required. */
+  REPRICER_BUYER_BLOCK_ON_STALE: z.string().optional().default("true"),
+  /** Для авто-применения цены требовать VERIFIED buyer данные. */
+  REPRICER_REQUIRE_VERIFIED_BUYER_FOR_AUTO_APPLY: z.string().optional().default("true"),
+  /** Разрешить last good для рекомендации (без авто-применения). */
+  REPRICER_ALLOW_LASTGOOD_FOR_RECOMMENDATION: z.string().optional().default("true"),
+  /** Разрешить last good для авто-применения. По умолчанию запрещено. */
+  REPRICER_ALLOW_LASTGOOD_FOR_AUTO_APPLY: z.string().optional().default("false"),
   /**
    * После «Получить команду для входа»: запустить CLI в фоне (откроется окно браузера).
    * Пусто = на macOS включено, на Linux — выкл.; 1/0 — явно.

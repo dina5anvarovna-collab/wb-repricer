@@ -7,6 +7,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import axios from "axios";
+import type { Prisma } from "@prisma/client";
 import { chromium, type BrowserContext } from "playwright";
 import { env } from "../../config/env.js";
 import { WB_ENDPOINTS } from "../../config/wbEndpoints.js";
@@ -28,11 +29,13 @@ import {
   type StorageStateShape,
 } from "./buyerStorageIo.js";
 import { runtimePaths } from "../../lib/runtimePaths.js";
-import type {
-  BuyerAuthCanonicalStatus,
-  BuyerCookiePipelineResult,
-  BuyerProbeResult,
+import {
+  BuyerSessionStatus,
+  type BuyerAuthCanonicalStatus,
+  type BuyerCookiePipelineResult,
+  type BuyerProbeResult,
 } from "./buyerSessionTypes.js";
+import { isBuyerAuthDisabled } from "../../lib/repricerMode.js";
 
 const TAG = "buyer-session-manager";
 
@@ -121,6 +124,153 @@ export function spawnBuyerLoginWindowIfConfigured(cliCommand: string): {
 
 function ttlMs(): number {
   return env.REPRICER_BUYER_SESSION_TTL_MIN * 60 * 1000;
+}
+
+export function computeSessionStatus(input: {
+  disabled: boolean;
+  profileDirExists: boolean;
+  storageStateExists: boolean;
+  lastValidatedAt: Date | null;
+  lastProbeOk: boolean;
+  requestedReauth?: boolean;
+  now?: Date;
+}): BuyerSessionStatus {
+  if (input.disabled) return BuyerSessionStatus.DISABLED;
+  if (input.requestedReauth) return BuyerSessionStatus.NEEDS_REAUTH;
+  if (!input.profileDirExists || !input.storageStateExists) return BuyerSessionStatus.INVALID;
+  if (!input.lastProbeOk) return BuyerSessionStatus.INVALID;
+  if (!input.lastValidatedAt) return BuyerSessionStatus.STALE;
+  const now = input.now ?? new Date();
+  return now.getTime() - input.lastValidatedAt.getTime() <= ttlMs()
+    ? BuyerSessionStatus.FRESH
+    : BuyerSessionStatus.STALE;
+}
+
+async function upsertAuthSessionBuyerTx(
+  tx: Prisma.TransactionClient,
+  input: {
+    status: BuyerSessionStatus;
+    lastError: string | null;
+    lastValidatedAt: Date | null;
+    lastRefreshAt: Date | null;
+  },
+): Promise<void> {
+  const storageStatePath = resolveStorageStatePathAbs();
+  const profileDir = resolveBuyerProfileDirAbs();
+  await tx.authSession.upsert({
+    where: { kind: "buyer_browser" },
+    create: {
+      kind: "buyer_browser",
+      status: input.status,
+      lastError: input.lastError,
+      lastValidatedAt: input.lastValidatedAt,
+      lastRefreshAt: input.lastRefreshAt,
+      lastCookieExportAt: new Date(),
+      storageStatePath,
+      profileDir,
+      metaJson: JSON.stringify({ source: "buyerSessionManager" }),
+    },
+    update: {
+      status: input.status,
+      lastError: input.lastError,
+      ...(input.lastValidatedAt ? { lastValidatedAt: input.lastValidatedAt } : {}),
+      ...(input.lastRefreshAt ? { lastRefreshAt: input.lastRefreshAt } : {}),
+      lastCookieExportAt: new Date(),
+      storageStatePath,
+      profileDir,
+    },
+  });
+}
+
+export async function updateSessionValidationResult(input: {
+  sessionId?: string;
+  profileDir: string;
+  probeOk: boolean;
+  probeReason: string;
+  hasDomAccess: boolean;
+  hasCookieAccess: boolean;
+  hasShowcaseAccess: boolean;
+  needsReauth?: boolean;
+  now?: Date;
+}): Promise<{
+  sessionId: string;
+  status: BuyerSessionStatus;
+  lastValidatedAt: Date | null;
+}> {
+  const now = input.now ?? new Date();
+  const profileDir = path.resolve(input.profileDir);
+  const profileDirExists = fs.existsSync(profileDir);
+  const storageStateExists = fs.existsSync(resolveStorageStatePathAbs());
+  const status = computeSessionStatus({
+    disabled: false,
+    profileDirExists,
+    storageStateExists,
+    lastValidatedAt: now,
+    lastProbeOk: input.probeOk,
+    requestedReauth: input.needsReauth === true,
+    now,
+  });
+  const isAuthorized = status === BuyerSessionStatus.FRESH;
+  const validationMeta = JSON.stringify({
+    validation: status,
+    validationReason: input.probeReason,
+    probeOk: input.probeOk === true,
+    hasDomAccess: input.hasDomAccess === true,
+    hasCookieAccess: input.hasCookieAccess === true,
+    hasShowcaseAccess: input.hasShowcaseAccess === true,
+    validatedAt: now.toISOString(),
+  });
+
+  return prisma.$transaction(async (tx) => {
+    const existing = input.sessionId
+      ? await tx.buyerSession.findUnique({ where: { id: input.sessionId } })
+      : await tx.buyerSession.findFirst({ orderBy: { updatedAt: "desc" } });
+
+    const data = {
+      profileDir,
+      isAuthorized,
+      status,
+      ...(isAuthorized ? { lastSuccessAt: now } : {}),
+      lastValidatedAt: input.needsReauth ? null : now,
+      lastProbeOk: input.probeOk,
+      lastProbeReason: input.probeReason,
+      ...(input.probeOk ? { lastStorageExportAt: now } : {}),
+      notes: validationMeta,
+    };
+
+    const row = existing
+      ? await tx.buyerSession.update({ where: { id: existing.id }, data })
+      : await tx.buyerSession.create({ data });
+
+    await upsertAuthSessionBuyerTx(tx, {
+      status,
+      lastError: isAuthorized ? null : input.probeReason,
+      lastValidatedAt: input.needsReauth ? null : now,
+      lastRefreshAt: input.probeOk ? now : null,
+    });
+
+    return {
+      sessionId: row.id,
+      status,
+      lastValidatedAt: input.needsReauth ? null : now,
+    };
+  });
+}
+
+export async function updateSessionValidationResultSafe(
+  input: Parameters<typeof updateSessionValidationResult>[0],
+  writer: (payload: Parameters<typeof updateSessionValidationResult>[0]) => ReturnType<typeof updateSessionValidationResult> = updateSessionValidationResult,
+): Promise<{ ok: true; status: BuyerSessionStatus } | { ok: false; status: BuyerSessionStatus; error: string }> {
+  try {
+    const out = await writer(input);
+    return { ok: true, status: out.status };
+  } catch (e) {
+    return {
+      ok: false,
+      status: BuyerSessionStatus.INVALID,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
 }
 
 function probeNmId(): number {
@@ -534,41 +684,13 @@ export async function importBuyerStorageStateFromJson(body: unknown): Promise<{
       };
     }
     const profileDir = resolveBuyerProfileDirAbs();
-    const existing = await prisma.buyerSession.findFirst({ orderBy: { updatedAt: "desc" } });
-    if (existing) {
-      await prisma.buyerSession.update({
-        where: { id: existing.id },
-        data: {
-          profileDir,
-          isAuthorized: true,
-          status: "active",
-          lastSuccessAt: new Date(),
-          lastValidatedAt: new Date(),
-          lastProbeOk: true,
-          lastProbeReason: "import_storage_state_json",
-          lastStorageExportAt: new Date(),
-          notes: null,
-        },
-      });
-    } else {
-      await prisma.buyerSession.create({
-        data: {
-          profileDir,
-          isAuthorized: true,
-          status: "active",
-          lastSuccessAt: new Date(),
-          lastValidatedAt: new Date(),
-          lastProbeOk: true,
-          lastProbeReason: "import_storage_state_json",
-          lastStorageExportAt: new Date(),
-        },
-      });
-    }
-    await mirrorAuthSessionBuyerRow({
-      status: "active",
-      lastError: null,
-      lastValidatedAt: new Date(),
-      lastRefreshAt: new Date(),
+    await updateSessionValidationResult({
+      profileDir,
+      probeOk: true,
+      probeReason: "import_storage_state_json",
+      hasDomAccess: true,
+      hasCookieAccess: true,
+      hasShowcaseAccess: card.ok,
     });
     logger.info({ tag: TAG }, "buyer storageState импортирован с диска, сессия активирована");
     return {
@@ -624,40 +746,14 @@ export async function importBuyerBrowserProfileArchive(buffer: Buffer): Promise<
       await fsp.mkdir(path.dirname(profileDir), { recursive: true });
       await fsp.cp(sourceRoot, profileDir, { recursive: true });
 
-      const existing = await prisma.buyerSession.findFirst({ orderBy: { updatedAt: "desc" } });
-      const notes = JSON.stringify({
-        phase: "profile_archive_imported",
-        importedAt: new Date().toISOString(),
-        backupPath,
-      });
-      if (existing) {
-        await prisma.buyerSession.update({
-          where: { id: existing.id },
-          data: {
-            profileDir,
-            isAuthorized: false,
-            status: "pending_login",
-            lastProbeOk: false,
-            lastProbeReason: "profile_zip_imported_needs_confirm",
-            notes,
-          },
-        });
-      } else {
-        await prisma.buyerSession.create({
-          data: {
-            profileDir,
-            isAuthorized: false,
-            status: "pending_login",
-            lastProbeOk: false,
-            lastProbeReason: "profile_zip_imported_needs_confirm",
-            notes,
-          },
-        });
-      }
-      await mirrorAuthSessionBuyerRow({
-        status: "invalid",
-        lastError: "profile_zip_imported_needs_confirm",
-        lastValidatedAt: new Date(),
+      await updateSessionValidationResult({
+        profileDir,
+        probeOk: false,
+        probeReason: "profile_zip_imported_needs_confirm",
+        hasDomAccess: false,
+        hasCookieAccess: false,
+        hasShowcaseAccess: false,
+        needsReauth: true,
       });
       logger.info({ tag: TAG, profileDir, backupPath }, "buyer profile archive imported (pending confirm)");
       return {
@@ -718,7 +814,7 @@ export async function ensureProfileDirExists(): Promise<string> {
  */
 export async function getCookieHeaderForPipeline(): Promise<BuyerCookiePipelineResult> {
   const row = await prisma.buyerSession.findFirst({
-    where: { isAuthorized: true, status: "active", lastProbeOk: true },
+    where: { lastProbeOk: true },
     orderBy: { updatedAt: "desc" },
   });
   const st = await loadSavedSession();
@@ -726,8 +822,15 @@ export async function getCookieHeaderForPipeline(): Promise<BuyerCookiePipelineR
   if (!header) {
     return { header: null, validation: "none", reason: "no_storage_state_or_empty_cookies" };
   }
-  const t = row?.lastValidatedAt?.getTime() ?? 0;
-  const fresh = row != null && Date.now() - t < ttlMs();
+  const sessionStatus = computeSessionStatus({
+    disabled: isBuyerAuthDisabled(),
+    profileDirExists: fs.existsSync(resolveBuyerProfileDirAbs()),
+    storageStateExists: fs.existsSync(resolveStorageStatePathAbs()),
+    lastValidatedAt: row?.lastValidatedAt ?? null,
+    lastProbeOk: row?.lastProbeOk ?? false,
+    requestedReauth: row?.status === "needs_reauth",
+  });
+  const fresh = sessionStatus === BuyerSessionStatus.FRESH;
   if (fresh) {
     logger.info(
       { tag: TAG, validation: "fresh", ttlMin: env.REPRICER_BUYER_SESSION_TTL_MIN },
@@ -746,7 +849,7 @@ export async function getCookieHeaderForPipeline(): Promise<BuyerCookiePipelineR
   return {
     header,
     validation: "stale",
-    reason: row?.lastProbeReason ?? "probe_stale_or_never_validated",
+    reason: row?.lastProbeReason ?? `probe_${sessionStatus}`,
   };
 }
 
@@ -777,10 +880,16 @@ export async function getBuyerAuthStatus(): Promise<{
   const row = await prisma.buyerSession.findFirst({
     orderBy: { updatedAt: "desc" },
   });
-  const st: BuyerAuthCanonicalStatus =
-    (row?.status as BuyerAuthCanonicalStatus) ?? "unknown";
+  const canonical = computeSessionStatus({
+    disabled: isBuyerAuthDisabled(),
+    profileDirExists: fs.existsSync(profileDir),
+    storageStateExists: fs.existsSync(storageStatePath),
+    lastValidatedAt: row?.lastValidatedAt ?? null,
+    lastProbeOk: row?.lastProbeOk ?? false,
+    requestedReauth: row?.status === "needs_reauth",
+  });
   return {
-    canonical: row?.status === "pending_login" ? "pending_login" : st,
+    canonical,
     profileDir,
     storageStatePath,
     lastValidatedAt: row?.lastValidatedAt?.toISOString() ?? null,
@@ -789,21 +898,51 @@ export async function getBuyerAuthStatus(): Promise<{
   };
 }
 
+export async function getBuyerSessionDebugSnapshot(): Promise<{
+  status: BuyerSessionStatus;
+  lastValidatedAt: string | null;
+  lastProbeOk: boolean;
+  lastProbeReason: string | null;
+  profileDirExists: boolean;
+  storageStateExists: boolean;
+  disabled: boolean;
+}> {
+  const profileDir = resolveBuyerProfileDirAbs();
+  const storageStatePath = resolveStorageStatePathAbs();
+  const profileDirExists = fs.existsSync(profileDir);
+  const storageStateExists = fs.existsSync(storageStatePath);
+  const row = await prisma.buyerSession.findFirst({ orderBy: { updatedAt: "desc" } });
+  const disabled = isBuyerAuthDisabled();
+  const status = computeSessionStatus({
+    disabled,
+    profileDirExists,
+    storageStateExists,
+    lastValidatedAt: row?.lastValidatedAt ?? null,
+    lastProbeOk: row?.lastProbeOk ?? false,
+    requestedReauth: row?.status === "needs_reauth",
+  });
+  return {
+    status,
+    lastValidatedAt: row?.lastValidatedAt?.toISOString() ?? null,
+    lastProbeOk: row?.lastProbeOk ?? false,
+    lastProbeReason: row?.lastProbeReason ?? null,
+    profileDirExists,
+    storageStateExists,
+    disabled,
+  };
+}
+
 export async function markSessionExpired(reason: string): Promise<void> {
   const latest = await prisma.buyerSession.findFirst({ orderBy: { updatedAt: "desc" } });
-  if (latest) {
-    await prisma.buyerSession.update({
-      where: { id: latest.id },
-      data: {
-        status: "expired",
-        isAuthorized: false,
-        lastProbeOk: false,
-        lastProbeReason: reason.slice(0, 500),
-        lastValidatedAt: new Date(),
-      },
-    });
-  }
-  await mirrorAuthSessionBuyerRow({ status: "expired", lastError: reason, lastValidatedAt: new Date() });
+  await updateSessionValidationResult({
+    sessionId: latest?.id,
+    profileDir: latest?.profileDir ?? resolveBuyerProfileDirAbs(),
+    probeOk: false,
+    probeReason: reason.slice(0, 500),
+    hasDomAccess: false,
+    hasCookieAccess: false,
+    hasShowcaseAccess: false,
+  });
 }
 
 /**
@@ -830,22 +969,22 @@ export async function verifyBuyerSessionAfterLogin(sessionId: string): Promise<{
   }
   if (!probe.ok) {
     const reason = probe.reason ?? "probe_failed";
-    await prisma.buyerSession.update({
-      where: { id: sessionId },
-      data: {
-        isAuthorized: false,
-        status: "invalid",
-        lastProbeOk: false,
-        lastProbeReason: reason,
-        lastValidatedAt: new Date(),
-        notes: JSON.stringify({ finishRejectedAt: new Date().toISOString(), reason }),
-      },
+    const persistResult = await updateSessionValidationResultSafe({
+      sessionId,
+      profileDir: profileAbs,
+      probeOk: false,
+      probeReason: reason,
+      hasDomAccess: probe.hasDomAccess === true,
+      hasCookieAccess: probe.hasCookieAccess === true,
+      hasShowcaseAccess: probe.hasShowcaseAccess === true,
     });
-    await mirrorAuthSessionBuyerRow({
-      status: "invalid",
-      lastError: reason,
-      lastValidatedAt: new Date(),
-    });
+    if (!persistResult.ok) {
+      return {
+        ok: false,
+        message: "Probe failed and validation state was not persisted to DB.",
+        probe,
+      };
+    }
     return {
       ok: false,
       message:
@@ -853,51 +992,40 @@ export async function verifyBuyerSessionAfterLogin(sessionId: string): Promise<{
       probe,
     };
   }
-  const s = await prisma.buyerSession.update({
-    where: { id: sessionId },
-    data: {
-      isAuthorized: true,
-      status: "active",
-      lastSuccessAt: new Date(),
-      lastValidatedAt: new Date(),
-      lastProbeOk: true,
-      lastProbeReason:
-        probe.reason ??
-        (probe.hasShowcaseAccess
-          ? "probe_ok_dom_cookie_showcase"
-          : "probe_ok_dom_cookie_no_showcase"),
-      lastStorageExportAt: new Date(),
-      notes: JSON.stringify({
-        validation: "fresh",
-        validationReason:
-          probe.reason ??
-          (probe.hasShowcaseAccess
-            ? "probe_ok_dom_cookie_showcase"
-            : "probe_ok_dom_cookie_no_showcase"),
-        probeOk: true,
-        hasDomAccess: probe.hasDomAccess === true,
-        hasCookieAccess: probe.hasCookieAccess === true,
-        hasShowcaseAccess: probe.hasShowcaseAccess === true,
-      }),
-    },
+  const validationReason =
+    probe.reason ??
+    (probe.hasShowcaseAccess ? "probe_ok_dom_cookie_showcase" : "probe_ok_dom_cookie_no_showcase");
+  const updated = await updateSessionValidationResultSafe({
+    sessionId,
+    profileDir: profileAbs,
+    probeOk: true,
+    probeReason: validationReason,
+    hasDomAccess: probe.hasDomAccess === true,
+    hasCookieAccess: probe.hasCookieAccess === true,
+    hasShowcaseAccess: probe.hasShowcaseAccess === true,
   });
-  await mirrorAuthSessionBuyerRow({
-    status: "active",
-    lastError: null,
-    lastValidatedAt: new Date(),
-    lastRefreshAt: new Date(),
-  });
+  if (!updated.ok) {
+    return {
+      ok: false,
+      message: "Сессия прошла probe, но результат не удалось сохранить в БД.",
+      probe,
+    };
+  }
+  const s = await prisma.buyerSession.findUnique({ where: { id: sessionId } });
+  if (!s || updated.status !== BuyerSessionStatus.FRESH) {
+    return {
+      ok: false,
+      message: "Сессия прошла probe, но не стала fresh после записи в БД.",
+      probe,
+    };
+  }
   logger.info(
     {
       tag: TAG,
       sessionId,
       validation: "fresh",
       lastValidatedAt: s.lastValidatedAt?.toISOString() ?? null,
-      validationReason:
-        probe.reason ??
-        (probe.hasShowcaseAccess
-          ? "probe_ok_dom_cookie_showcase"
-          : "probe_ok_dom_cookie_no_showcase"),
+      validationReason,
       hasDomAccess: probe.hasDomAccess,
       hasCookieAccess: probe.hasCookieAccess,
       hasShowcaseAccess: probe.hasShowcaseAccess,
@@ -924,91 +1052,52 @@ export async function refreshBuyerSessionIfNeeded(opts?: {
   const profileDir = await ensureProfileDirExists();
   const headed = opts?.headed === true;
   const row = await prisma.buyerSession.findFirst({
-    where: { isAuthorized: true, status: "active" },
     orderBy: { updatedAt: "desc" },
   });
-  if (!opts?.force && row?.lastValidatedAt && Date.now() - row.lastValidatedAt.getTime() < ttlMs()) {
+  if (
+    !opts?.force &&
+    row &&
+    computeSessionStatus({
+      disabled: false,
+      profileDirExists: fs.existsSync(resolveBuyerProfileDirAbs()),
+      storageStateExists: fs.existsSync(resolveStorageStatePathAbs()),
+      lastValidatedAt: row.lastValidatedAt ?? null,
+      lastProbeOk: row.lastProbeOk,
+      requestedReauth: row.status === "needs_reauth",
+    }) === BuyerSessionStatus.FRESH
+  ) {
     return { ok: true, message: "Профиль свежий, soft refresh пропущен" };
   }
   const probe =
     buyerProbeUsesCookiesOnlyMode() && !headed
       ? await runBuyerProbeCookiesOnlyExport({ profileDir })
       : await runBuyerProbeAndExport({ profileDir, headed });
-  if (!probe.ok) {
-    await mirrorAuthSessionBuyerRow({
-      status: "expired",
-      lastError: probe.reason ?? "refresh_probe_failed",
-      lastValidatedAt: new Date(),
-      lastRefreshAt: new Date(),
-    });
-    return { ok: false, message: probe.reason ?? "refresh failed", probe };
-  }
-  const toUpdate =
-    row ??
-    (await prisma.buyerSession.findFirst({
-      where: { profileDir },
-      orderBy: { updatedAt: "desc" },
-    }));
-  const now = new Date();
-  const validationFresh =
-    probe.ok === true &&
-    probe.hasDomAccess === true &&
-    probe.hasCookieAccess === true;
   const validationReason =
     probe.reason ??
-    (probe.hasShowcaseAccess
-      ? "probe_ok_dom_cookie_showcase"
-      : "probe_ok_dom_cookie_no_showcase");
-  const validationMeta = JSON.stringify({
-    validation: validationFresh ? "fresh" : "stale",
-    validationReason,
+    (probe.hasShowcaseAccess ? "probe_ok_dom_cookie_showcase" : "probe_ok_dom_cookie_no_showcase");
+  const persistResult = await updateSessionValidationResultSafe({
+    sessionId: row?.id,
+    profileDir,
     probeOk: probe.ok === true,
+    probeReason: validationReason,
     hasDomAccess: probe.hasDomAccess === true,
     hasCookieAccess: probe.hasCookieAccess === true,
     hasShowcaseAccess: probe.hasShowcaseAccess === true,
-    validatedAt: now.toISOString(),
   });
-  if (toUpdate) {
-    await prisma.buyerSession.update({
-      where: { id: toUpdate.id },
-      data: {
-        profileDir,
-        isAuthorized: validationFresh,
-        status: validationFresh ? "active" : "invalid",
-        ...(validationFresh ? { lastSuccessAt: now } : {}),
-        lastValidatedAt: now,
-        lastProbeOk: validationFresh,
-        lastProbeReason: validationReason,
-        lastStorageExportAt: now,
-        notes: validationMeta,
-      },
-    });
-  } else {
-    await prisma.buyerSession.create({
-      data: {
-        profileDir,
-        isAuthorized: validationFresh,
-        status: validationFresh ? "active" : "invalid",
-        ...(validationFresh ? { lastSuccessAt: now } : {}),
-        lastValidatedAt: now,
-        lastProbeOk: validationFresh,
-        lastProbeReason: validationReason,
-        lastStorageExportAt: now,
-        notes: validationMeta,
-      },
-    });
+  if (!persistResult.ok) {
+    logger.error(
+      { tag: TAG, err: persistResult.error },
+      "buyer refresh: failed to persist validation result",
+    );
+    return { ok: false, message: "failed to persist buyer session state", probe };
   }
-  await mirrorAuthSessionBuyerRow({
-    status: validationFresh ? "active" : "invalid",
-    lastError: validationFresh ? null : validationReason,
-    lastValidatedAt: now,
-    lastRefreshAt: now,
-  });
+  const persistedStatus = persistResult.status;
+  const validationFresh = persistedStatus === BuyerSessionStatus.FRESH;
   logger.info(
     {
       tag: TAG,
       validation: validationFresh ? "fresh" : "stale",
-      lastValidatedAt: now.toISOString(),
+      lastValidatedAt: new Date().toISOString(),
       validationReason,
       hasDomAccess: probe.hasDomAccess,
       hasCookieAccess: probe.hasCookieAccess,
@@ -1016,6 +1105,9 @@ export async function refreshBuyerSessionIfNeeded(opts?: {
     },
     "buyer probe persisted to session state",
   );
+  if (!validationFresh) {
+    return { ok: false, message: validationReason || "refresh failed", probe };
+  }
   return { ok: true, message: "storageState переснят, buyer probe успешен", probe };
 }
 

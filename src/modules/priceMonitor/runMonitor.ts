@@ -26,6 +26,8 @@ import {
 } from "../../lib/ephemeralWalletProfile.js";
 import { resolveObservedBuyerPrices } from "../pricing/resolveObservedBuyerPrices.js";
 import { canPersistVerifiedWalletTruth } from "../pricing/buyerVerificationCrossCheck.js";
+import { decideRepricing } from "../pricing/decideRepricing.js";
+import type { WalletDecisionSessionStatus } from "../pricing/walletEvidence.js";
 import {
   aggregateTrustedProductSnapshot,
   buildBuyerRegionalSnapshotFromResolved,
@@ -49,6 +51,50 @@ import {
 } from "../../lib/unifiedPriceModel.js";
 
 const EVAL_TOL_RUB = 3;
+
+function envFlagEnabled(raw: string | undefined, defaultValue: boolean): boolean {
+  const v = raw?.trim().toLowerCase() ?? "";
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  return defaultValue;
+}
+
+type MonitorHoldState = {
+  captcha: boolean;
+  stale: boolean;
+  skipUpdate: boolean;
+  reason: "captcha_hold" | "stale_hold" | "none";
+};
+
+export function classifyMonitorHoldState(input: {
+  parseStatus: string | null | undefined;
+  httpStatus: number | null;
+  validation: "fresh" | "stale" | "invalid" | "unknown";
+}): MonitorHoldState {
+  const ps = String(input.parseStatus ?? "");
+  const captcha = ps === "blocked_or_captcha" || ps === "captcha" || input.httpStatus === 498;
+  const stale = input.validation === "stale" || ps === "auth_required";
+  const blockCaptcha = envFlagEnabled(env.REPRICER_BUYER_BLOCK_ON_CAPTCHA, true);
+  const blockStale = envFlagEnabled(env.REPRICER_BUYER_BLOCK_ON_STALE, true);
+  if (captcha && blockCaptcha) {
+    return { captcha: true, stale: false, skipUpdate: true, reason: "captcha_hold" };
+  }
+  if (stale && blockStale) {
+    return { captcha: false, stale: true, skipUpdate: true, reason: "stale_hold" };
+  }
+  return { captcha, stale, skipUpdate: false, reason: "none" };
+}
+
+export function shouldSkipOverwriteLastGood(input: {
+  walletRub: number | null;
+  nonWalletRub: number | null;
+}): boolean {
+  if (!envFlagEnabled(env.REPRICER_BUYER_NEVER_OVERWRITE_LASTGOOD_WITH_NULL, true)) return false;
+  return (
+    (input.walletRub == null || !Number.isFinite(input.walletRub) || input.walletRub <= 0) &&
+    (input.nonWalletRub == null || !Number.isFinite(input.nonWalletRub) || input.nonWalletRub <= 0)
+  );
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -184,17 +230,19 @@ export async function runPriceMonitorJob(opts: {
 
   try {
     let session: Awaited<ReturnType<typeof prisma.buyerSession.findFirst>> = null;
+    let buyerSessionValidation: "fresh" | "stale" | "invalid" | "unknown" = "unknown";
     let profileDir = resolveBuyerProfileDir();
     if (isBuyerAuthDisabled()) {
       ephemeralProfileDir = createEphemeralWalletProfileDir();
       profileDir = ephemeralProfileDir;
+      buyerSessionValidation = "unknown";
       logger.info(
         { tag: "monitor-public-only", profileDir },
         "public parse started — ephemeral browser profile (no buyer auth)",
       );
     } else {
       session = await prisma.buyerSession.findFirst({
-        where: { status: "active", isAuthorized: true },
+        where: { status: "fresh", isAuthorized: true },
         orderBy: { updatedAt: "desc" },
       });
       profileDir = session?.profileDir ?? resolveBuyerProfileDir();
@@ -202,11 +250,16 @@ export async function runPriceMonitorJob(opts: {
 
       const chk = await checkBuyerSession(profileDir);
       if (chk.status === "valid") {
+        buyerSessionValidation = "fresh";
         logger.info(
           { tag: "buyer_session_valid", profileDir, detail: chk.detail },
           "buyer session validated — browser parsing with saved profile",
         );
       } else {
+        buyerSessionValidation =
+          chk.status === "stale" || chk.status === "auth_wall" || chk.status === "captcha" || chk.status === "blocked"
+            ? "stale"
+            : "invalid";
         ephemeralBuyerFallback = true;
         logger.warn(
           {
@@ -246,6 +299,13 @@ export async function runPriceMonitorJob(opts: {
     if (!isBuyerAuthDisabled() && !ephemeralBuyerFallback) {
       await prepareBuyerSessionForMonitor();
     }
+    const sessionStatusForDecision: WalletDecisionSessionStatus = isBuyerAuthDisabled()
+      ? "unknown"
+      : session?.status === "fresh" && !ephemeralBuyerFallback
+        ? "fresh"
+        : buyerSessionValidation === "stale"
+          ? "stale"
+          : "invalid";
 
     const parseStats = {
       publicDom: 0,
@@ -323,6 +383,20 @@ export async function runPriceMonitorJob(opts: {
       const parseStatus = dom.parseStatus ?? null;
       const parseConfidence = dom.sourceConfidence ?? null;
       const parseMethod = dom.parseMethod ?? null;
+      const rawHttpStatus =
+        typeof (dom as { httpStatus?: unknown }).httpStatus === "number"
+          ? Math.round((dom as { httpStatus?: number }).httpStatus ?? 0)
+          : typeof (dom as { responseStatus?: unknown }).responseStatus === "number"
+            ? Math.round((dom as { responseStatus?: number }).responseStatus ?? 0)
+            : (dom.error?.includes("498") ? 498 : null);
+      const holdState = classifyMonitorHoldState({
+        parseStatus,
+        httpStatus: rawHttpStatus,
+        validation:
+          (dom as { validation?: unknown }).validation === "stale"
+            ? "stale"
+            : sessionStatusForDecision,
+      });
       const tier = dom.priceParseSource ?? null;
       if (tier === "public_dom") parseStats.publicDom += 1;
       else if (tier === "popup_dom") parseStats.popupDom += 1;
@@ -339,6 +413,7 @@ export async function runPriceMonitorJob(opts: {
         stockLevel,
         expectedNmId: p.nmId,
         expectedDest: destKey,
+        sessionStatus: sessionStatusForDecision,
         monitorBatchDestCount: destList.length,
         fallbackContext: {
           discountedPriceRub: p.discountedPriceRub,
@@ -350,9 +425,11 @@ export async function runPriceMonitorJob(opts: {
           lastKnownWalletRub: p.lastKnownWalletRub,
           lastRegularObservedRub: p.lastRegularObservedRub,
           lastWalletObservedRub: p.lastWalletObservedRub,
+          walletRubLastGood: p.walletRubLastGood,
+          nonWalletRubLastGood: p.nonWalletRubLastGood,
         },
       });
-      const persistVerifiedWallet = canPersistVerifiedWalletTruth({
+      let persistVerifiedWallet = canPersistVerifiedWalletTruth({
         verification: resolved.buyerPriceVerification,
         blockedBySafetyRule: resolved.blockedBySafetyRule,
         regionPriceAmbiguous: resolved.regionPriceAmbiguous ?? null,
@@ -360,7 +437,7 @@ export async function runPriceMonitorJob(opts: {
       });
       let buyerWallet = resolved.buyerWallet;
       let showcaseRub = resolved.showcaseRub;
-      const buyerRegular = resolved.buyerRegular;
+      let buyerRegular = resolved.buyerRegular;
 
       const parseRecovered =
         dom.success &&
@@ -379,9 +456,41 @@ export async function runPriceMonitorJob(opts: {
           parseStatus !== "loaded_showcase_only");
 
       const lastGoodMode = lastGoodSubstitutionMode(p.walletRubLastGoodAt ?? null);
-
+      const lastGoodAgeMin =
+        p.walletRubLastGoodAt != null
+          ? Math.max(0, (Date.now() - p.walletRubLastGoodAt.getTime()) / 60_000)
+          : null;
+      const allowFailOpenWithLastGood = envFlagEnabled(env.REPRICER_BUYER_FAIL_OPEN_WITH_LASTGOOD, true);
+      const holdWindowMinutes =
+        holdState.reason === "captcha_hold"
+          ? env.REPRICER_BUYER_CAPTCHA_HOLD_MINUTES
+          : env.REPRICER_BUYER_STALE_HOLD_MINUTES;
+      const lastGoodFresh =
+        p.walletRubLastGood != null &&
+        Number.isFinite(p.walletRubLastGood) &&
+        p.walletRubLastGood > 0 &&
+        (lastGoodAgeMin == null || lastGoodAgeMin <= env.REPRICER_BUYER_LASTGOOD_TTL_MINUTES);
       let usedLastGoodFallback = false;
       let protectOnlyLastGood = false;
+      let skipUpdate = false;
+      if (holdState.reason === "captcha_hold") {
+        logger.warn({ nmId: p.nmId, dest: destKey, parseStatus, httpStatus: rawHttpStatus }, "captcha detected → HOLD");
+        skipUpdate = true;
+      } else if (holdState.reason === "stale_hold") {
+        logger.warn({ nmId: p.nmId, dest: destKey, parseStatus, validation: sessionStatusForDecision }, "stale session → HOLD");
+        skipUpdate = true;
+      }
+      if (skipUpdate && allowFailOpenWithLastGood && lastGoodFresh && (lastGoodAgeMin == null || lastGoodAgeMin <= holdWindowMinutes)) {
+        usedLastGoodFallback = true;
+        showcaseRub = Math.round(p.walletRubLastGood!);
+        buyerWallet = Math.round(p.walletRubLastGood!);
+        buyerRegular =
+          p.nonWalletRubLastGood != null && Number.isFinite(p.nonWalletRubLastGood) && p.nonWalletRubLastGood > 0
+            ? Math.round(p.nonWalletRubLastGood)
+            : buyerRegular;
+        logger.warn({ nmId: p.nmId, dest: destKey, lastGoodAgeMin }, "using last good snapshot");
+      }
+
       if (
         isPublicOnlyWalletParse() &&
         !parseRecovered &&
@@ -415,7 +524,10 @@ export async function runPriceMonitorJob(opts: {
       const buyerRegularSource = resolved.buyerRegularSource;
       const fb = resolved.fallback;
       const { showcaseEff, cookieShowcase, apiWalletRub, domRegular, sppWoWallet } = resolved.signals;
-      const priceWithoutWalletRub = resolved.priceWithoutWalletRub;
+      let priceWithoutWalletRub = resolved.priceWithoutWalletRub;
+      if (priceWithoutWalletRub == null && buyerRegular != null) {
+        priceWithoutWalletRub = buyerRegular;
+      }
 
       const partialDom =
         parseStatus === "loaded_showcase_only" ||
@@ -438,6 +550,28 @@ export async function runPriceMonitorJob(opts: {
       const hardAuth =
         parseStatus === "auth_required" || parseStatus === "blocked_or_captcha";
       const hasUsablePrice = resolved.hasUsablePrice || usedLastGoodFallback;
+      const parsedAtMs = Date.parse(dom.parsedAt ?? "");
+      const ageMinutes =
+        Number.isFinite(parsedAtMs) && parsedAtMs > 0
+          ? Math.max(0, (Date.now() - parsedAtMs) / 60_000)
+          : null;
+      const pricingDecision = decideRepricing({
+        sellerPriceRub: p.sellerPrice ?? null,
+        floorRub: targetRub,
+        walletEvidence: resolved.walletEvidence,
+        sessionStatus: sessionStatusForDecision,
+        stock: stockLevel,
+        freshness: {
+          isFresh:
+            !hardAuth &&
+            parseStatus !== "parse_failed" &&
+            parseStatus !== "loaded_no_price" &&
+            (ageMinutes == null || ageMinutes <= env.REPRICER_BUYER_SNAPSHOT_TTL_MINUTES),
+          ageMinutes,
+        },
+      });
+      const repricingAllowed = pricingDecision.action === "enforce_now";
+      persistVerifiedWallet = persistVerifiedWallet && repricingAllowed;
 
       const noShowcaseLive = showcaseRub == null;
       const noDomRegularSignal = domRegular == null && showcaseEff == null && buyerRegular == null;
@@ -458,7 +592,7 @@ export async function runPriceMonitorJob(opts: {
         }
       } else {
         errMsg = null;
-        if (resolved.repricingAllowed) {
+        if (repricingAllowed) {
           status = "ok";
         } else if (stockLevel === "OUT_OF_STOCK" && hasUsablePrice) {
           status = "ok";
@@ -474,7 +608,7 @@ export async function runPriceMonitorJob(opts: {
           { tag: "monitor-pricing", nmId: p.nmId, stockLevel },
           "витрина: товар в наличии, обычная цена в DOM не найдена",
         );
-      } else if (stockLevel === "IN_STOCK" && dom.success && !resolved.repricingAllowed) {
+      } else if (stockLevel === "IN_STOCK" && dom.success && !repricingAllowed) {
         logger.warn(
           {
             tag: "monitor-pricing",
@@ -484,8 +618,9 @@ export async function runPriceMonitorJob(opts: {
             verificationReason: resolved.buyerPriceVerification.verificationReason,
             verificationMethod: resolved.buyerPriceVerification.verificationMethod,
             trustedSource: resolved.trustedSource,
-            repricingAllowed: resolved.repricingAllowed,
-            repricingAllowedReason: resolved.repricingAllowedReason,
+            repricingAllowed,
+            repricingAllowedReason: `${resolved.repricingAllowedReason};decision=${pricingDecision.action}`,
+            pricingDecision: pricingDecision.action,
             parseStatus,
             topPriceFound: resolved.topPriceFound,
             priceParseMode: resolved.priceParseMode,
@@ -524,10 +659,18 @@ export async function runPriceMonitorJob(opts: {
         stockLevel === "IN_STOCK" &&
         dom.success &&
         !hardAuth &&
-        !resolved.repricingAllowed &&
+        !repricingAllowed &&
         evaluationBase === "ok"
           ? "buyer_unverified"
           : evaluationBase;
+      if (pricingDecision.status === "safe_hold" && stockLevel === "IN_STOCK") {
+        evaluationStatus =
+          pricingDecision.action === "skip_conflict"
+            ? "wallet_source_unavailable_safe_hold"
+            : pricingDecision.action === "skip_stale"
+              ? "buyer_unverified"
+              : "wallet_source_unavailable_safe_hold";
+      }
 
       if (parseRecovered && parseStatus === "loaded_showcase_only") {
         evaluationStatus = "partial";
@@ -535,6 +678,11 @@ export async function runPriceMonitorJob(opts: {
       if (usedLastGoodFallback) {
         evaluationStatus =
           lastGoodMode === "full" ? "last_good_used" : "wallet_source_unavailable_safe_hold";
+      }
+      if (skipUpdate) {
+        evaluationStatus = "wallet_source_unavailable_safe_hold";
+        status = "warning";
+        errMsg = holdState.reason;
       }
 
       const sellerBasePriceRub =
@@ -561,6 +709,7 @@ export async function runPriceMonitorJob(opts: {
         parseMethod,
         monitorParseContour: contourEff,
         stockLevel,
+        sessionStatus: sessionStatusForDecision,
         evaluationStatus,
         diffSellerVsTarget: diffSeller,
         diffWalletVsTarget: diffWallet,
@@ -568,8 +717,10 @@ export async function runPriceMonitorJob(opts: {
         usedFallback: fb.usedFallback,
         fallbackChain: fb.fallbackChain,
         sellerBasePriceRub,
-        repricingAllowed: resolved.repricingAllowed,
-        repricingAllowedReason: resolved.repricingAllowedReason,
+        repricingAllowed,
+        repricingAllowedReason: `${resolved.repricingAllowedReason};decision=${pricingDecision.action}`,
+        pricingDecision: pricingDecision.action,
+        decisionStatus: pricingDecision.status,
         blockedBySafetyRule: resolved.blockedBySafetyRule,
         basePriceRub: resolved.basePriceRub,
         sellerDiscountPriceRub: resolved.sellerDiscountPriceRub,
@@ -647,13 +798,48 @@ export async function runPriceMonitorJob(opts: {
         walletNumericConfidence,
         lastGoodSubstitutionMode: lastGoodMode,
         protectOnlyLastGood,
+        walletEvidence: resolved.walletEvidence,
         walletConfirmed: dom.walletConfirmed === true,
-        walletEvidence: dom.walletEvidence ?? null,
+        parserWalletEvidence: dom.walletEvidence ?? null,
         parserWalletRub: dom.walletRub ?? null,
         parserNonWalletRub: dom.nonWalletRub ?? null,
         batchMonitorDestCount: destList.length,
         batchMultiDestPending: destList.length > 1,
       });
+
+      const preventOverwriteWithNull = envFlagEnabled(
+        env.REPRICER_BUYER_NEVER_OVERWRITE_LASTGOOD_WITH_NULL,
+        true,
+      );
+      const skipOverwriteLastGood =
+        preventOverwriteWithNull &&
+        shouldSkipOverwriteLastGood({
+          walletRub: canonicalBuyerWalletRub,
+          nonWalletRub: priceWithoutWalletRub,
+        });
+      if (skipOverwriteLastGood) {
+        logger.warn({ nmId: p.nmId, dest: destKey }, "skip overwrite lastGood");
+      }
+      if (skipUpdate || skipOverwriteLastGood) {
+        const isPrimaryHold = destKey === primaryDest || (primaryDest == null && destKey == null);
+        if (isPrimaryHold) {
+          await prisma.wbProduct.update({
+            where: { id: p.id },
+            data: {
+              safeModeHold: true,
+              lastEvaluationStatus: "wallet_source_unavailable_safe_hold",
+              lastWalletParseStatus: parseStatus,
+              lastMonitorAt: new Date(),
+              lastMonitorRegionDest: destKey,
+            },
+          });
+        }
+        processed += 1;
+        if (pauseAfter && env.REPRICER_MONITOR_BATCH_PAUSE_MS > 0) {
+          await new Promise((r) => setTimeout(r, env.REPRICER_MONITOR_BATCH_PAUSE_MS));
+        }
+        return;
+      }
 
       await prisma.priceSnapshot.create({
         data: {

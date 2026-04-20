@@ -4,6 +4,12 @@ import { env } from "../../config/env.js";
 import type { MonitorFallbackPrices } from "../priceMonitor/monitorPriceFallback.js";
 import type { BuyerPriceVerificationSnapshot } from "./buyerPriceVerification.js";
 import { applyBuyerVerificationCrossCheck, canPersistVerifiedWalletTruth } from "./buyerVerificationCrossCheck.js";
+import {
+  normalizeWalletParseStatus,
+  type WalletDecisionSessionStatus,
+  type WalletEvidence,
+  type WalletEvidenceSource,
+} from "./walletEvidence.js";
 
 type FallbackContext = {
   discountedPriceRub: number | null;
@@ -15,6 +21,8 @@ type FallbackContext = {
   lastKnownWalletRub: number | null;
   lastRegularObservedRub: number | null;
   lastWalletObservedRub: number | null;
+  walletRubLastGood: number | null;
+  nonWalletRubLastGood: number | null;
 };
 
 export type ResolvedObservedBuyerPrices = {
@@ -67,6 +75,7 @@ export type ResolvedObservedBuyerPrices = {
   finalRegionConfidence: "HIGH" | "MEDIUM" | "LOW" | null;
   finalWalletConfidence: "HIGH" | "MEDIUM" | "LOW" | null;
   repricingDecisionSource: string | null;
+  walletEvidence: WalletEvidence;
   signals: {
     showcaseEff: number | null;
     cookieShowcase: number | null;
@@ -79,6 +88,13 @@ export type ResolvedObservedBuyerPrices = {
 function toRub(v: number | null | undefined): number | null {
   if (v == null || !Number.isFinite(v) || v <= 0) return null;
   return Math.round(v);
+}
+
+function envFlagEnabled(raw: string | undefined, defaultValue: boolean): boolean {
+  const v = raw?.trim().toLowerCase() ?? "";
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  return defaultValue;
 }
 
 function percent(numerator: number | null, denominator: number | null): number | null {
@@ -143,6 +159,7 @@ export function resolveObservedBuyerPrices(input: {
   stockLevel: StockLevel;
   expectedNmId?: number | null;
   expectedDest?: string | null;
+  sessionStatus?: WalletDecisionSessionStatus | null;
   fallbackContext: FallbackContext;
   /** Количество регионов в текущем прогоне монитора; при >1 финальный VERIFIED только после batch (каталог). */
   monitorBatchDestCount?: number | null;
@@ -166,14 +183,31 @@ export function resolveObservedBuyerPrices(input: {
     popupWithoutWalletRub > 0 &&
     popupWalletRub != null &&
     popupWalletRub > 0;
+  const domWalletAcceptedRub = toRub(
+    (dom as BuyerDomResult & { walletPriceRubAcceptedFromDom?: number | null }).walletPriceRubAcceptedFromDom,
+  );
+  const domShowcaseFromDom = toRub(skipDomShowcaseAsWalletChannel ? null : dom.showcaseRubFromDom);
+  const cardApiShowcaseRub = toRub(
+    (dom as BuyerDomResult & { cardApiShowcaseRub?: number | null }).cardApiShowcaseRub ?? dom.showcaseApiRub ?? null,
+  );
+  const domWalletComparable = toRub(domWalletAcceptedRub ?? domShowcaseFromDom ?? parserShowcase ?? dom.walletRub);
+  const walletChannelValues = [domWalletComparable, popupWalletRub].filter(
+    (v): v is number => v != null && Number.isFinite(v) && v > 0,
+  );
+  const walletChannelSpread =
+    walletChannelValues.length >= 2 ? Math.max(...walletChannelValues) - Math.min(...walletChannelValues) : 0;
+  const cookieWalletConflict =
+    cookieShowcase != null &&
+    ((domWalletComparable != null && cookieShowcase <= domWalletComparable + 1) ||
+      (popupWalletRub != null && cookieShowcase <= popupWalletRub + 1));
+  const walletConflictDetected =
+    dom.sourceConflictDetected === true || walletChannelSpread > 1 || cookieWalletConflict;
   const apiWalletRub = toRub(dom.apiWalletRub);
   const domRegular = toRub(dom.priceRegular);
   const domWalletObserved = toRub(
     popupWalletRub ??
-      (skipDomShowcaseAsWalletChannel
-        ? null
-        : (dom as BuyerDomResult & { walletPriceRubAcceptedFromDom?: number | null }).walletPriceRubAcceptedFromDom) ??
-      (skipDomShowcaseAsWalletChannel ? null : dom.showcaseRubFromDom) ??
+      domWalletAcceptedRub ??
+      domShowcaseFromDom ??
       dom.priceWallet,
   );
   const oldPriceRub = toRub((dom as any).oldPriceRub ?? null);
@@ -186,7 +220,7 @@ export function resolveObservedBuyerPrices(input: {
    */
   const domWalletVerifiedRub = toRub(
     verification.verificationMethod === "dom_wallet"
-      ? (popupWalletRub ?? verification.walletPriceVerified ?? verification.showcaseWalletPrice)
+      ? (popupWalletRub ?? domWalletAcceptedRub ?? verification.walletPriceVerified ?? verification.showcaseWalletPrice)
       : null,
   );
   /**
@@ -194,7 +228,7 @@ export function resolveObservedBuyerPrices(input: {
    * чтобы не терять фактическую витрину в таблице. Но для репрайса используется
    * только verified dom_wallet + подтверждённый регион (см. repricingAllowed ниже).
    */
-  let buyerWallet: number | null = domWalletVerifiedRub ?? parserShowcase ?? domWalletObserved;
+  let buyerWallet: number | null = domWalletVerifiedRub ?? domWalletAcceptedRub ?? parserShowcase ?? domWalletObserved;
   if (
     buyerWallet == null &&
     parseStatusRaw === "loaded_showcase_only" &&
@@ -266,17 +300,49 @@ export function resolveObservedBuyerPrices(input: {
     fallbackChain: [],
   };
 
-  /** Витринная цена: приоритет поля парсера, иначе эвристика loaded_showcase_only. */
-  let showcaseRub = parserShowcase ?? buyerWallet;
-  if (
-    parseStatusRaw === "loaded_showcase_only" &&
-    showcaseEff != null &&
-    showcaseEff > 0 &&
-    parserShowcase == null
-  ) {
+  /** Инвариант: showcase = wallet. */
+  let showcaseRub = buyerWallet;
+  if (showcaseRub == null && parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0) {
     showcaseRub = showcaseEff;
   }
   let priceWithoutWalletRub = parserNonWallet ?? buyerRegular;
+  if (priceWithoutWalletRub == null) {
+    if (domShowcaseFromDom != null && buyerWallet != null && domShowcaseFromDom > buyerWallet) {
+      priceWithoutWalletRub = domShowcaseFromDom;
+    } else if (
+      cardApiShowcaseRub != null &&
+      buyerWallet != null &&
+      cardApiShowcaseRub > buyerWallet &&
+      cardApiShowcaseRub !== buyerWallet
+    ) {
+      priceWithoutWalletRub = cardApiShowcaseRub;
+    }
+  }
+  const allowLastGoodRecommendation = envFlagEnabled(env.REPRICER_ALLOW_LASTGOOD_FOR_RECOMMENDATION, true);
+  let usedLastGoodFallbackForObserved = false;
+  if (allowLastGoodRecommendation) {
+    const lastGoodWallet = toRub(
+      fallbackContext.walletRubLastGood ??
+        fallbackContext.lastKnownWalletRub ??
+        fallbackContext.lastKnownShowcaseRub ??
+        fallbackContext.lastWalletObservedRub,
+    );
+    const lastGoodNonWallet = toRub(
+      fallbackContext.nonWalletRubLastGood ??
+        fallbackContext.lastRegularObservedRub ??
+        fallbackContext.lastSnapshotRegularRub,
+    );
+    if (buyerWallet == null && lastGoodWallet != null) {
+      buyerWallet = lastGoodWallet;
+      showcaseRub = lastGoodWallet;
+      walletSource = "last_good_fallback";
+      usedLastGoodFallbackForObserved = true;
+    }
+    if (priceWithoutWalletRub == null && lastGoodNonWallet != null) {
+      priceWithoutWalletRub = lastGoodNonWallet;
+      usedLastGoodFallbackForObserved = true;
+    }
+  }
   let walletDiscountRub =
     showcaseRub != null && priceWithoutWalletRub != null
       ? Math.max(0, Math.round(priceWithoutWalletRub - showcaseRub))
@@ -331,6 +397,9 @@ export function resolveObservedBuyerPrices(input: {
     if (dom.regionPriceAmbiguous === true && !regionConfirmedByStableReload) {
       blockedBySafetyRule.push("region_price_ambiguous");
     }
+  }
+  if (walletConflictDetected) {
+    blockedBySafetyRule.push("wallet_source_conflict");
   }
 
   if (sellerDiscountPriceRub != null && sppRub != null && (sppRub < 0 || sppRub >= sellerDiscountPriceRub)) {
@@ -412,7 +481,7 @@ export function resolveObservedBuyerPrices(input: {
     {
       parseStatus: parseStatusRaw,
       regionPriceAmbiguous: dom.regionPriceAmbiguous,
-      sourceConflictDetected: dom.sourceConflictDetected,
+      sourceConflictDetected: walletConflictDetected,
     },
     verification,
     blockedBySafetyRule,
@@ -426,10 +495,12 @@ export function resolveObservedBuyerPrices(input: {
   });
 
   if (!persistWalletTruth) {
-    buyerWallet = null;
-    showcaseRub = null;
+    if (!usedLastGoodFallbackForObserved) {
+      buyerWallet = null;
+      showcaseRub = null;
+    }
     parseMode = "unverified";
-    walletSource = "wallet_truth_suppressed";
+    walletSource = usedLastGoodFallbackForObserved ? "last_good_fallback_unverified" : "wallet_truth_suppressed";
     fallback.buyerWallet = null;
     walletDiscountRub =
       showcaseRub != null && priceWithoutWalletRub != null
@@ -449,6 +520,12 @@ export function resolveObservedBuyerPrices(input: {
         : null;
     walletDiscountPercent = percent(walletDiscountRub, priceWithoutWalletRub);
   }
+
+  const observedWalletRub = buyerWallet != null && buyerWallet > 0 ? Math.round(buyerWallet) : null;
+  const observedShowcaseRub = observedWalletRub;
+  const observedNonWalletRub =
+    priceWithoutWalletRub != null && priceWithoutWalletRub > 0 ? Math.round(priceWithoutWalletRub) : null;
+  const observedRegularRub = buyerRegular != null && buyerRegular > 0 ? Math.round(buyerRegular) : null;
 
   topPriceFound =
     (buyerWallet != null && Number.isFinite(buyerWallet) && buyerWallet > 0) ||
@@ -476,23 +553,52 @@ export function resolveObservedBuyerPrices(input: {
           ? "MEDIUM"
           : "LOW";
   sourceConfidence = confidence === "HIGH" ? "high" : confidence === "MEDIUM" ? "medium" : "low";
-  const strongWalletSignal =
-    persistWalletTruth &&
-    topPriceFound === true &&
-    showcaseRub != null &&
-    showcaseRub > 0 &&
-    (dom.walletConfirmed === true && toRub(dom.walletRub) != null
-      ? true
-      : verificationFinal.verificationStatus === "VERIFIED" &&
-        verificationFinal.verificationMethod === "dom_wallet" &&
-        verificationFinal.trustedSource === "product_page_wallet_selector");
-  let repricingAllowed =
-    strongWalletSignal &&
+  const sessionStatus: WalletDecisionSessionStatus = input.sessionStatus ?? "unknown";
+  const regionValid =
     (expectedDest == null ? true : regionConfirmedComposite) &&
     !(dom.regionPriceAmbiguous === true && !regionConfirmedByStableReload);
+  const parseStatusNormalized = normalizeWalletParseStatus(parseStatusRaw);
+  const evidenceConfirmed = persistWalletTruth && observedWalletRub != null && observedWalletRub > 0;
+  const evidenceChannels = [
+    domWalletComparable != null ? "dom" : null,
+    popupWalletRub != null ? "modal" : null,
+    cookieShowcase != null ? "cookies" : null,
+  ].filter((v): v is "dom" | "modal" | "cookies" => v != null);
+  const walletEvidenceSource: WalletEvidenceSource =
+    evidenceChannels.length >= 2
+      ? "mixed"
+      : evidenceChannels[0] ?? (walletSource.includes("product_page") ? "dom" : "unverified");
+  const strictActionable =
+    evidenceConfirmed &&
+    parseStatusNormalized === "success" &&
+    sessionStatus !== "invalid" &&
+    regionValid &&
+    !walletConflictDetected;
+  let walletEvidence: WalletEvidence = {
+    walletRub: observedWalletRub,
+    showcaseRub: observedShowcaseRub,
+    nonWalletRub: observedNonWalletRub,
+    regularRub: observedRegularRub,
+    source: walletEvidenceSource,
+    sourceConfidence,
+    confirmed: evidenceConfirmed,
+    parseStatus: parseStatusNormalized,
+    region: input.expectedDest ?? null,
+    nmId: dom.nmId ?? input.expectedNmId ?? null,
+    observedAt: typeof dom.parsedAt === "string" && dom.parsedAt.length > 0 ? dom.parsedAt : new Date().toISOString(),
+    conflict: walletConflictDetected,
+    level: strictActionable ? "actionable" : evidenceConfirmed ? "confirmed" : "observed",
+    actionable: strictActionable,
+  };
+
+  let repricingAllowed = walletEvidence.actionable;
   let repricingAllowedReason = repricingAllowed
-    ? "strong_wallet_plus_region_confirmation"
+    ? "wallet_evidence_actionable"
     : [verificationFinal.verificationReason, ...blockedBySafetyRule].filter(Boolean).join(";");
+  if (!walletEvidence.actionable) {
+    parseMode = "unverified";
+    walletSource = "wallet_not_actionable_safe_hold";
+  }
 
   const batchMulti = (input.monitorBatchDestCount ?? 1) > 1;
   let buyerVerificationOut: BuyerPriceVerificationSnapshot = {
@@ -502,6 +608,17 @@ export function resolveObservedBuyerPrices(input: {
   if (batchMulti) {
     repricingAllowed = false;
     repricingAllowedReason = [repricingAllowedReason, "monitor_multi_dest_pending"].filter(Boolean).join(";");
+    walletEvidence = {
+      ...walletEvidence,
+      actionable: false,
+      level: walletEvidence.confirmed ? "confirmed" : "observed",
+    };
+    buyerWallet = null;
+    showcaseRub = null;
+    parseMode = "unverified";
+    walletSource = "wallet_batch_pending_safe_hold";
+    walletDiscountRub = null;
+    walletDiscountPercent = null;
     buyerVerificationOut = {
       ...verificationFinal,
       verificationStatus: "UNVERIFIED",
@@ -518,6 +635,15 @@ export function resolveObservedBuyerPrices(input: {
       showcaseWalletPrice: null,
     };
   }
+
+  topPriceFound =
+    (buyerWallet != null && Number.isFinite(buyerWallet) && buyerWallet > 0) ||
+    (priceWithoutWalletRub != null && Number.isFinite(priceWithoutWalletRub) && priceWithoutWalletRub > 0);
+  hasUsablePrice =
+    (buyerWallet != null && Number.isFinite(buyerWallet) && buyerWallet > 0) ||
+    (buyerRegular != null && Number.isFinite(buyerRegular) && buyerRegular > 0) ||
+    (parseStatusRaw === "loaded_showcase_only" && showcaseEff != null && showcaseEff > 0) ||
+    (parserShowcase != null && parserShowcase > 0);
 
   return {
     basePriceRub,
@@ -553,8 +679,9 @@ export function resolveObservedBuyerPrices(input: {
         : "unverified"),
     trustedSource: verificationFinal.trustedSource,
     sourcePriority: typeof dom.sourcePriority === "string" ? dom.sourcePriority : null,
-    sourceConflictDetected: dom.sourceConflictDetected === true,
+    sourceConflictDetected: walletConflictDetected,
     buyerPriceVerification: buyerVerificationOut,
+    walletEvidence,
     sppCalcSource,
     sppCalcReason,
     destApplied: typeof dom.destApplied === "boolean" ? dom.destApplied : null,
