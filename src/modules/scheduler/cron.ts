@@ -12,6 +12,7 @@ import { resolveWalletRegionOpts, runEnforcementJob } from "../priceEnforcement/
 import { runPriceMonitorJob } from "../priceMonitor/runMonitor.js";
 import { runUnifiedSync } from "../wbSync/unifiedSyncService.js";
 import { runFloorProtectionBatch } from "../floorProtection/floorEngine.js";
+import { getActiveCabinetToken } from "../catalogSync/syncCatalog.js";
 import { prisma } from "../../lib/prisma.js";
 
 const MONITOR_TICK_MS = 60_000;
@@ -160,17 +161,14 @@ export function startScheduler(): void {
       }, 30_000);
 
       try {
-        // Берём токен из БД (первый активный кабинет)
-        const cabinet = await prisma.sellerCabinet.findFirst({
-          where: { isActive: true },
-          select: { apiToken: true },
-        });
-        if (!cabinet?.apiToken) {
+        // Берём расшифрованный токен из БД (активный кабинет)
+        const cabinetAuth = await getActiveCabinetToken();
+        if (!cabinetAuth?.token) {
           logger.warn({ tag: "floor_no_token" }, "floor protection: нет активного seller token");
           return;
         }
 
-        const result = await runFloorProtectionBatch(cabinet.apiToken, {
+        const result = await runFloorProtectionBatch(cabinetAuth.token, {
           dryRun: floorDryRun(),
           bufferPct: env.REPRICER_FLOOR_BUFFER_PCT,
           maxStepPct: env.REPRICER_FLOOR_MAX_STEP_PCT,

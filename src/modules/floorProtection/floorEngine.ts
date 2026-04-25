@@ -394,7 +394,7 @@ async function runPostVerify(
 export async function runFloorProtectionBatch(
   token: string,
   opts: {
-    dryRun: boolean;
+    dryRun?: boolean;
     bufferPct?: number;
     maxStepPct?: number;
     postVerifyDelayMs?: number;
@@ -402,7 +402,7 @@ export async function runFloorProtectionBatch(
   } = {},
 ): Promise<{ processed: number; raised: number; skipped: number }> {
   const {
-    dryRun,
+    dryRun = false,
     bufferPct = 0.05,
     postVerifyDelayMs = 15 * 60_000, // 15 мин по умолчанию
     destListOverride,
