@@ -11,12 +11,24 @@ import {
 import { resolveWalletRegionOpts, runEnforcementJob } from "../priceEnforcement/runEnforcementJob.js";
 import { runPriceMonitorJob } from "../priceMonitor/runMonitor.js";
 import { runUnifiedSync } from "../wbSync/unifiedSyncService.js";
+import { runFloorProtectionBatch } from "../floorProtection/floorEngine.js";
+import { prisma } from "../../lib/prisma.js";
 
 const MONITOR_TICK_MS = 60_000;
 
 function catalogSyncHourlyEnabled(): boolean {
   const t = env.REPRICER_CRON_CATALOG_SYNC_HOURLY.trim().toLowerCase();
   return ["1", "true", "yes", "on"].includes(t);
+}
+
+function floorProtectionEnabled(): boolean {
+  const t = env.REPRICER_FLOOR_ENABLED.trim().toLowerCase();
+  return ["1", "true", "yes", "on"].includes(t);
+}
+
+function floorDryRun(): boolean {
+  const t = env.REPRICER_FLOOR_DRY_RUN.trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(t);
 }
 
 function cronMonitorDisabled(): boolean {
@@ -121,5 +133,66 @@ export function startScheduler(): void {
       }
     });
     logger.info("scheduler: hourly catalog sync enabled (REPRICER_CRON_CATALOG_SYNC_HOURLY)");
+  }
+
+  // ─── Floor Protection Engine ────────────────────────────────────────────────
+  if (floorProtectionEnabled()) {
+    const intervalMin = env.REPRICER_FLOOR_INTERVAL_MIN;
+    // Строим cron-выражение из интервала в минутах
+    const floorCronExpr =
+      intervalMin <= 59
+        ? `*/${intervalMin} * * * *`
+        : `0 */${Math.round(intervalMin / 60)} * * *`;
+
+    cron.schedule(floorCronExpr, async () => {
+      const ok = await acquireSchedulerLock("floor");
+      if (!ok) {
+        logger.warn({ tag: "floor_skipped_lock_active" }, "floor protection skip — lock held");
+        return;
+      }
+
+      // Heartbeat: обновляем каждые 30 сек пока работаем
+      const heartbeatInterval = setInterval(() => {
+        void prisma.schedulerLock.updateMany({
+          where: { id: "floor" },
+          data: { heartbeatAt: new Date() },
+        }).catch(() => undefined);
+      }, 30_000);
+
+      try {
+        // Берём токен из БД (первый активный кабинет)
+        const cabinet = await prisma.sellerCabinet.findFirst({
+          where: { isActive: true },
+          select: { apiToken: true },
+        });
+        if (!cabinet?.apiToken) {
+          logger.warn({ tag: "floor_no_token" }, "floor protection: нет активного seller token");
+          return;
+        }
+
+        const result = await runFloorProtectionBatch(cabinet.apiToken, {
+          dryRun: floorDryRun(),
+          bufferPct: env.REPRICER_FLOOR_BUFFER_PCT,
+          maxStepPct: env.REPRICER_FLOOR_MAX_STEP_PCT,
+          postVerifyDelayMs: env.REPRICER_FLOOR_POST_VERIFY_DELAY_MIN * 60_000,
+          destListOverride: env.REPRICER_FLOOR_DEST_LIST || undefined,
+        });
+
+        logger.info(
+          { tag: "floor_batch_done", ...result, dryRun: floorDryRun() },
+          "floor protection batch completed",
+        );
+      } catch (e) {
+        logger.error(e, "floor protection batch failed");
+      } finally {
+        clearInterval(heartbeatInterval);
+        await releaseSchedulerLock("floor");
+      }
+    });
+
+    logger.info(
+      { floorCronExpr, intervalMin, dryRun: floorDryRun() },
+      "scheduler: floor protection engine enabled",
+    );
   }
 }

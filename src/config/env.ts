@@ -234,6 +234,35 @@ const schema = z.object({
   REPRICER_PUBLIC_PROXY_SERVER: z.string().optional().default(""),
   REPRICER_PUBLIC_PROXY_USERNAME: z.string().optional().default(""),
   REPRICER_PUBLIC_PROXY_PASSWORD: z.string().optional().default(""),
+
+  // ─── Floor Protection Engine ────────────────────────────────────────────────
+  /** 1/true — включить floor protection engine (защита ценового floor). */
+  REPRICER_FLOOR_ENABLED: z.string().optional().default(""),
+  /** Интервал запуска floor protection (мин). Default: 15. */
+  REPRICER_FLOOR_INTERVAL_MIN: z.coerce.number().min(5).max(1440).default(15),
+  /** true — только расчёт + лог, без реального upload в WB. */
+  REPRICER_FLOOR_DRY_RUN: z.string().optional().default("false"),
+  /**
+   * Буфер к K_observed для компенсации реакции SPP (доли, не проценты).
+   * Default 0.05 = +5 п.п. Покрывает большинство SPP-реакций WB при повышении цены.
+   */
+  REPRICER_FLOOR_BUFFER_PCT: z.coerce.number().min(0).max(0.3).default(0.05),
+  /** Максимальный шаг повышения basePrice за один цикл (%). Default 30. */
+  REPRICER_FLOOR_MAX_STEP_PCT: z.coerce.number().min(1).max(100).default(30),
+  /**
+   * JSON-массив dest-кластеров для multi-region мониторинга.
+   * Пусто = 6 дефолтных кластеров (Москва, СПб, Екатеринбург, Новосибирск, Краснодар, Казань).
+   * Пример: [{"dest":"-1257786","label":"Москва"},{"dest":"-2133459","label":"СПб"}]
+   */
+  REPRICER_FLOOR_DEST_LIST: z.string().optional().default(""),
+  /** Задержка перед post-verify после upload (мин). Default 15. */
+  REPRICER_FLOOR_POST_VERIFY_DELAY_MIN: z.coerce.number().min(1).max(120).default(15),
+
+  // ─── Telegram уведомления ───────────────────────────────────────────────────
+  /** Telegram Bot API token (от @BotFather). */
+  TELEGRAM_BOT_TOKEN: z.string().optional().default(""),
+  /** Telegram Chat ID для уведомлений (число или @username). */
+  TELEGRAM_CHAT_ID: z.string().optional().default(""),
 });
 
 export type AppEnv = z.infer<typeof schema>;

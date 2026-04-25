@@ -2,9 +2,9 @@ import { env } from "../config/env.js";
 import { logger } from "./logger.js";
 import { prisma } from "./prisma.js";
 
-export type JobLockKind = "monitor" | "enforce" | "catalog";
+export type JobLockKind = "monitor" | "enforce" | "catalog" | "floor";
 
-const KINDS: JobLockKind[] = ["monitor", "enforce", "catalog"];
+const KINDS: JobLockKind[] = ["monitor", "enforce", "catalog", "floor"];
 
 function lockTtlMs(): number {
   return env.REPRICER_SCHEDULER_LOCK_TTL_MIN * 60 * 1000;

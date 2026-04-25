@@ -350,10 +350,12 @@ model SyncJob {
 
 /// Один активный lock на тип джобы: monitor | enforce | catalog
 model SchedulerLock {
-  id        String   @id
-  lockedBy  String?
-  lockedAt  DateTime?
-  expiresAt DateTime?
+  id          String    @id
+  lockedBy    String?
+  lockedAt    DateTime?
+  expiresAt   DateTime?
+  /// Heartbeat: воркер обновляет каждые 30 сек. Если устарел >2 мин — lock считается брошенным.
+  heartbeatAt DateTime?
 }
 
 /// История изменений целевой минимальной цены (аудит)
@@ -392,4 +394,51 @@ model UiAuditTrail {
   createdAt  DateTime @default(now())
 
   @@index([createdAt])
+}
+
+/// Лог каждого прогона Floor Protection Engine (observe → evaluate → upload → verify)
+model FloorProtectionLog {
+  id               String   @id @default(cuid())
+  createdAt        DateTime @default(now())
+
+  nmId             Int
+  productId        String?
+
+  /// Действие движка: no_change | raise_full | raise_partial | raise_full_dry | raise_partial_dry
+  ///   observation_failed | upload_failed | verify_ok | verify_failed | sku_frozen | cooldown_active
+  action           String
+
+  /// Абсолютный floor покупательской цены, установленный продавцом, руб.
+  floorPriceRub    Float
+
+  /// Наблюдаемая минимальная buyer-цена (worst-case регион), руб.
+  minBuyerPriceRub Float?
+
+  /// dest worst-case региона (с минимальной buyer-ценой)
+  worstCaseDest    String?
+  worstCaseLabel   String?
+
+  /// Суммарный дисконт WB в worst-case регионе: K = 1 - buyerPrice/sellerEffective
+  kObserved        Float?
+  /// Консервативный K с буфером: kObserved + buffer
+  kSafe            Float?
+
+  /// basePrice до и после (руб.)
+  oldBasePrice     Int?
+  newBasePrice     Int?
+
+  /// Скидка продавца в момент операции (%)
+  sellerDiscount   Int?
+
+  /// Текстовый код причины решения
+  reason           String?
+
+  dryRun           Boolean  @default(false)
+
+  /// JSON-снимок наблюдений по всем регионам (для отладки)
+  allRegionsJson   String?
+
+  @@index([nmId])
+  @@index([createdAt])
+  @@index([action])
 }
