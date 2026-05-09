@@ -1,20 +1,22 @@
 /**
  * Анонимный HTTP-клиент card.wb.ru — без Playwright, без куков, без авторизации.
  *
- * Возвращает clientPriceU (цена покупателя с WB Кошельком + SPP) и
- * basicPriceU (без WB Кошелька, только SPP).
+ * Поддерживает два формата ответа:
  *
- * Важно: salePriceU из ответа card.wb.ru = эффективная цена продавца
- * (после его скидки, до WB-механизмов). Используем её как P_eff и
- * как fallback для clientPriceRub если extended не заполнен.
+ * v2 format (appType=1, /cards/v2/detail):
+ *   - top-level priceU, salePriceU
+ *   - extended.clientPriceU (с Кошельком), extended.basicPriceU (только SPP)
+ *
+ * v4 format (/cards/v4/detail) — используется с серверных IP:
+ *   - sizes[N].price.basic  = priceU (до скидки продавца)
+ *   - sizes[N].price.product = итоговая цена покупателя (с seller discount + SPP + wallet)
+ *   - Нет отдельных clientPriceU / basicPriceU / salePriceU
  *
  * Fallback-цепочка для clientPriceRub:
- *   extended.clientPriceU (с Кошельком, WB выдаёт для большинства товаров)
- *   → extended.basicPriceU (с SPP, без Кошелька)
- *   → salePriceU           (цена продавца, без SPP — консервативный fallback)
- *
- * Для товаров с 0% скидкой и без SPP (промышленное оборудование) extended
- * часто пустой, поэтому цепочка fallback критична.
+ *   extended.clientPriceU (v2, лучший)
+ *   → sizes[N].price.product (v4, buyer price after all discounts)
+ *   → extended.basicPriceU (v2, без wallet)
+ *   → salePriceU (v2, без SPP — консервативный)
  */
 
 import { logger } from "./logger.js";
@@ -24,15 +26,15 @@ const ENDPOINTS = ["/cards/v2/detail", "/cards/v4/detail"] as const;
 
 /** Результат одного запроса card.wb.ru для конкретного dest. */
 export type CardWbProbeResult = {
-  /** Итоговая цена покупателя с WB Кошельком, руб. null если не удалось получить. */
+  /** Итоговая цена покупателя с WB Кошельком (или лучший доступный), руб. null если не удалось. */
   clientPriceRub: number | null;
-  /** Цена без WB Кошелька (с SPP), руб. */
+  /** Цена без WB Кошелька (с SPP только), руб. Может быть null если v4-формат. */
   basicPriceRub: number | null;
   /** Эффективная цена продавца (salePriceU) — до SPP и Кошелька, руб. */
   sellerEffectiveRub: number | null;
   /** Исходная цена продавца (priceU) до его собственной скидки, руб. */
   basePriceRub: number | null;
-  /** true если clientPriceRub получен из fallback (basicPriceU или salePriceU), а не из clientPriceU */
+  /** true если clientPriceRub получен из fallback, а не из clientPriceU */
   clientPriceIsFallback: boolean;
   httpStatus: number;
   endpoint: string;
@@ -41,32 +43,36 @@ export type CardWbProbeResult = {
 
 function safeRub(raw: unknown): number | null {
   if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return null;
-  // WB отдаёт значения в копейках (× 100) если > 300 × 100 = 30 000
+  // WB отдаёт значения в копейках (× 100) если > 30 000
   return raw >= 30_000 ? Math.round(raw / 100) : Math.round(raw);
 }
 
-function extractFromProduct(
+/**
+ * Парсит v2-формат ответа (extended.clientPriceU, top-level priceU/salePriceU).
+ */
+function extractV2(
   row: Record<string, unknown>,
   nmId: number,
 ): Omit<CardWbProbeResult, "httpStatus" | "endpoint" | "dest"> | null {
   const id = Number(row.id);
   if (Number.isFinite(id) && id !== nmId) return null;
 
-  // extended содержит clientPriceU и basicPriceU (WB Кошелёк и цена до него)
   const ext = row.extended as Record<string, unknown> | undefined;
   const clientPriceRubDirect = safeRub(ext?.clientPriceU);
   const basicPriceRub = safeRub(ext?.basicPriceU);
-
-  // salePriceU = effectiveCabinet (после скидки продавца, до SPP/Кошелька)
   const sellerEffectiveRub = safeRub(row.salePriceU);
   const basePriceRub = safeRub(row.priceU);
 
-  // Если нет ни salePriceU ни priceU — карточка пустая, пропускаем
-  if (sellerEffectiveRub == null && basePriceRub == null) return null;
+  // Нет ни одного полезного поля
+  if (
+    clientPriceRubDirect == null &&
+    basicPriceRub == null &&
+    sellerEffectiveRub == null &&
+    basePriceRub == null
+  )
+    return null;
 
-  // Fallback-цепочка для clientPriceRub:
-  // clientPriceU > basicPriceU > salePriceU (консервативный — без SPP/Кошелька скидок)
-  // Для промышленных товаров без WB Wallet и нулевым SPP: clientPriceU = salePriceU
+  // Fallback chain
   let clientPriceRub: number | null = clientPriceRubDirect;
   let clientPriceIsFallback = false;
 
@@ -85,9 +91,51 @@ function extractFromProduct(
   return { clientPriceRub, basicPriceRub, sellerEffectiveRub, basePriceRub, clientPriceIsFallback };
 }
 
+/**
+ * Парсит v4-формат ответа (sizes[N].price.product, sizes[N].price.basic).
+ * В v4 нет salePriceU и extended — только итоговая buyer-цена.
+ */
+function extractV4(
+  row: Record<string, unknown>,
+  nmId: number,
+): Omit<CardWbProbeResult, "httpStatus" | "endpoint" | "dest"> | null {
+  const id = Number(row.id);
+  if (Number.isFinite(id) && id !== nmId) return null;
+
+  const sizes = row.sizes as Array<Record<string, unknown>> | undefined;
+  if (!sizes || sizes.length === 0) return null;
+
+  // Берём первый размер с ненулевой ценой
+  let clientPriceRub: number | null = null;
+  let basePriceRub: number | null = null;
+
+  for (const size of sizes) {
+    const price = size.price as Record<string, unknown> | undefined;
+    if (!price) continue;
+    const product = safeRub(price.product);
+    const basic = safeRub(price.basic);
+    if (product != null) {
+      clientPriceRub = product;
+      basePriceRub = basic;
+      break;
+    }
+  }
+
+  if (clientPriceRub == null) return null;
+
+  return {
+    clientPriceRub,
+    basicPriceRub: null,       // v4 не предоставляет отдельно SPP-цену без кошелька
+    sellerEffectiveRub: null,  // v4 не предоставляет salePriceU
+    basePriceRub,
+    clientPriceIsFallback: false, // product в v4 — это и есть итоговая buyer-цена
+  };
+}
+
 function parseCardResponse(
   body: unknown,
   nmId: number,
+  endpoint: string,
 ): Omit<CardWbProbeResult, "httpStatus" | "endpoint" | "dest"> | null {
   if (!body || typeof body !== "object") return null;
   const o = body as Record<string, unknown>;
@@ -105,7 +153,16 @@ function parseCardResponse(
   // Ищем точное совпадение по id, иначе первый
   const byId = products.find((p) => Number((p as Record<string, unknown>).id) === nmId);
   const row = (byId ?? products[0]) as Record<string, unknown>;
-  return extractFromProduct(row, nmId);
+
+  // Используем нужный парсер в зависимости от версии endpoint
+  if (endpoint === "/cards/v4/detail") {
+    // Сначала пробуем v4-формат, fallback на v2 если v4-поля пустые
+    const v4 = extractV4(row, nmId);
+    if (v4) return v4;
+    return extractV2(row, nmId);
+  }
+
+  return extractV2(row, nmId);
 }
 
 /**
@@ -157,7 +214,7 @@ export async function probeCardWb(
       }
 
       const json: unknown = await res.json();
-      const parsed = parseCardResponse(json, nmId);
+      const parsed = parseCardResponse(json, nmId, endpoint);
       if (!parsed) {
         logger.warn({ tag: "card_wb_no_price", nmId, dest, endpoint }, "card.wb.ru: цена не найдена в ответе");
         continue;
@@ -166,9 +223,14 @@ export async function probeCardWb(
       if (parsed.clientPriceIsFallback) {
         logger.info(
           { tag: "card_wb_fallback", nmId, dest, endpoint, clientPriceRub: parsed.clientPriceRub },
-          "clientPriceRub — fallback (extended.clientPriceU отсутствует)",
+          "clientPriceRub — fallback (используем лучшую доступную цену)",
         );
       }
+
+      logger.debug(
+        { tag: "card_wb_ok", nmId, dest, endpoint, ...parsed },
+        "card.wb.ru: цена получена",
+      );
 
       return { ...base, ...parsed, httpStatus, endpoint };
     } catch (err) {
