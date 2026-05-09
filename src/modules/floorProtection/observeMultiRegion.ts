@@ -6,6 +6,10 @@
  *
  * Решение принимается только по минимальной цене: если хоть в одном
  * регионе покупатель видит цену ниже floor — инвариант нарушен.
+ *
+ * sellerEffectiveRub берётся из первого успешного probe-ответа card.wb.ru.
+ * salePriceU одинаков для всех регионов (определяется кабинетом, не складом).
+ * Дополнительный запрос к Seller API НЕ выполняется.
  */
 
 import { probeCardWb } from "../../lib/cardWbClient.js";
@@ -22,29 +26,39 @@ export async function observeMultiRegion(
   const clusters = getDestClusters(destListOverride);
   const observedAt = new Date();
 
-  // Параллельно запрашиваем все регионы
-  const raw = await Promise.all(
-    clusters.map(async ({ dest, label }): Promise<RegionObservation> => {
-      const result = await probeCardWb(nmId, dest);
-      if (result.clientPriceRub == null) {
-        return {
-          dest,
-          label,
-          clientPriceRub: null,
-          basicPriceRub: null,
-          ok: false,
-          errorReason: `http_${result.httpStatus}_endpoint_${result.endpoint}`,
-        };
-      }
+  // Параллельно запрашиваем все регионы, сохраняем полный ответ probe
+  const rawProbes = await Promise.all(
+    clusters.map(async ({ dest, label }) => {
+      const probe = await probeCardWb(nmId, dest);
+      return { dest, label, probe };
+    }),
+  );
+
+  // Формируем RegionObservation[]
+  const raw: RegionObservation[] = rawProbes.map(({ dest, label, probe }) => {
+    if (probe.clientPriceRub == null) {
       return {
         dest,
         label,
-        clientPriceRub: result.clientPriceRub,
-        basicPriceRub: result.basicPriceRub,
-        ok: true,
+        clientPriceRub: null,
+        basicPriceRub: null,
+        ok: false,
+        errorReason: `http_${probe.httpStatus}_endpoint_${probe.endpoint}`,
       };
-    }),
-  );
+    }
+    return {
+      dest,
+      label,
+      clientPriceRub: probe.clientPriceRub,
+      basicPriceRub: probe.basicPriceRub,
+      ok: true,
+    };
+  });
+
+  // sellerEffectiveRub берём из первого успешного probe
+  // (salePriceU одинаков для всех регионов — определяется скидкой продавца в кабинете)
+  const sellerEffectiveRub =
+    rawProbes.find((r) => r.probe.sellerEffectiveRub != null)?.probe.sellerEffectiveRub ?? null;
 
   const successful = raw.filter((r) => r.ok && r.clientPriceRub != null);
 
@@ -57,7 +71,7 @@ export async function observeMultiRegion(
       minBuyerPriceRub: null,
       worstCaseDest: null,
       worstCaseLabel: null,
-      sellerEffectiveRub: null,
+      sellerEffectiveRub,
       allRegions: raw,
       observedAt,
     };
@@ -67,12 +81,6 @@ export async function observeMultiRegion(
   const worstCase = successful.reduce((a, b) =>
     a.clientPriceRub! < b.clientPriceRub! ? a : b,
   );
-
-  // sellerEffectiveRub берём из любого успешного ответа card.wb.ru
-  // (salePriceU одинаков для всех регионов — определяется кабинетом)
-  // Если недоступен — будет восстановлен из WB Seller API в floorEngine
-  const probeForEff = await probeCardWb(nmId, worstCase.dest);
-  const sellerEffectiveRub = probeForEff.sellerEffectiveRub;
 
   logger.info(
     {

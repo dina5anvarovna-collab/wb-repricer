@@ -4,17 +4,22 @@
  * Инвариант: min(clientPriceRub across monitored regions) >= floorPriceRub
  *
  * Алгоритм для каждого SKU:
- *   1. OBSERVE   — запросить card.wb.ru по всем регионам параллельно
+ *   1. OBSERVE   — запросить card.wb.ru по всем регионам параллельно (БЕЗ Seller API)
  *   2. EVALUATE  — сравнить minBuyerPriceRub с floorPriceRub
- *   3. UPLOAD    — если нарушение, поднять basePrice (если не dryRun)
- *   4. LOG       — записать в FloorProtectionLog
- *   5. NOTIFY    — Telegram alert
- *   6. POST-VERIFY (через postVerifyDelayMs) — подтвердить восстановление
+ *   3. READ DB   — взять sellerPrice / sellerDiscount из таблицы WbProduct (синхронизируется вручную)
+ *   4. COMPUTE   — рассчитать новый basePrice
+ *   5. UPLOAD    — если нарушение и не dryRun, загрузить через Seller API (только запись!)
+ *   6. LOG       — записать в FloorProtectionLog
+ *   7. POST-VERIFY (через postVerifyDelayMs) — подтвердить восстановление
+ *
+ * ВАЖНО: Seller API используется ТОЛЬКО для загрузки (upload) новых цен.
+ *        Чтение текущих цен — ВСЕГДА из локальной БД (WbProduct.sellerPrice / sellerDiscount).
+ *        Синхронизация БД — только по нажатию кнопки «Синхронизация» в интерфейсе.
  */
 
 import { logger } from "../../lib/logger.js";
 import { prisma } from "../../lib/prisma.js";
-import { fetchGoodsPriceByNmId, uploadGoodsPricesTask } from "../wbSellerApi/client.js";
+import { uploadGoodsPricesTask } from "../wbSellerApi/client.js";
 import { observeMultiRegion } from "./observeMultiRegion.js";
 import { computeRaise } from "./computeRaise.js";
 import { sendTelegramAlert } from "./telegramAlert.js";
@@ -50,6 +55,33 @@ async function isInCooldown(cfg: SkuFloorConfig): Promise<boolean> {
   if (!cfg.lastSuccessfulRaiseAt) return false;
   const elapsed = Date.now() - cfg.lastSuccessfulRaiseAt.getTime();
   return elapsed < cfg.cooldownMinutes * 60_000;
+}
+
+/**
+ * Читает актуальные данные цены из локальной БД (WbProduct).
+ * Данные обновляются только при ручной синхронизации каталога.
+ * Seller API НЕ вызывается.
+ */
+async function readSellerDataFromDb(
+  nmId: number,
+): Promise<{ currentBasePrice: number; sellerDiscountPct: number } | null> {
+  const product = await prisma.wbProduct.findFirst({
+    where: { nmId },
+    select: { sellerPrice: true, sellerDiscount: true },
+  });
+
+  if (!product?.sellerPrice || product.sellerPrice <= 0) {
+    logger.warn(
+      { tag: TAG, nmId },
+      "WbProduct not found or sellerPrice=0 — каталог не синхронизирован, пропускаем",
+    );
+    return null;
+  }
+
+  return {
+    currentBasePrice: Math.round(product.sellerPrice),
+    sellerDiscountPct: product.sellerDiscount ?? 0,
+  };
 }
 
 async function writeLog(params: {
@@ -93,7 +125,7 @@ export async function runFloorEngineForSku(
   const { nmId, productId, floorPriceRub } = cfg;
   const { dryRun, bufferPct, postVerifyDelayMs } = opts;
 
-  // ── STEP 1: OBSERVE ────────────────────────────────────────────────────────
+  // ── STEP 1: OBSERVE (card.wb.ru — анонимный, без Seller API) ───────────────
   const observation: MultiRegionObservation = await observeMultiRegion(
     nmId,
     opts.destListOverride,
@@ -173,27 +205,41 @@ export async function runFloorEngineForSku(
     };
   }
 
-  // ── STEP 3: GET SELLER DATA ────────────────────────────────────────────────
-  const sellerData = await fetchGoodsPriceByNmId(token, nmId).catch(() => null);
-  if (!sellerData) {
-    logger.warn({ tag: TAG, nmId }, "Seller API вернул null — пропускаем");
+  // ── STEP 3: READ SELLER DATA FROM DB (не из Seller API!) ───────────────────
+  const dbData = await readSellerDataFromDb(nmId);
+  if (!dbData) {
+    await writeLog({
+      nmId, productId, action: "skip_no_db_data", floorPriceRub, minBuyerPriceRub,
+      worstCaseDest: observation.worstCaseDest, worstCaseLabel: observation.worstCaseLabel,
+      kObserved: null, kSafe: null,
+      oldBasePrice: null, newBasePrice: null, sellerDiscount: null,
+      reason: "no_product_in_db_run_sync",
+      dryRun,
+      allRegionsJson: JSON.stringify(observation.allRegions),
+    });
     return {
       nmId, productId, floorPriceRub, observation,
-      decision: { action: "skip_no_data", reason: "seller_api_null" },
+      decision: { action: "skip_no_data", reason: "no_product_in_db_run_sync" },
       dryRun,
     };
   }
 
+  const { currentBasePrice, sellerDiscountPct } = dbData;
   const sellerEffectiveRub =
     observation.sellerEffectiveRub ??
-    Math.round(sellerData.price * (1 - sellerData.discount / 100));
+    Math.round(currentBasePrice * (1 - sellerDiscountPct / 100));
+
+  logger.info(
+    { tag: TAG, nmId, currentBasePrice, sellerDiscountPct, sellerEffectiveRub, source: "db" },
+    "seller data from DB",
+  );
 
   // ── STEP 4: COMPUTE RAISE ──────────────────────────────────────────────────
   const decision = computeRaise({
     minBuyerPriceRub,
     sellerEffectiveRub,
-    currentBasePrice: sellerData.price,
-    sellerDiscountPct: sellerData.discount,
+    currentBasePrice,
+    sellerDiscountPct,
     floorPriceRub,
     bufferPct,
     maxStepPct: cfg.maxStepPercent,
@@ -206,8 +252,8 @@ export async function runFloorEngineForSku(
       nmId, productId, action: decision.action, floorPriceRub, minBuyerPriceRub,
       worstCaseDest: observation.worstCaseDest, worstCaseLabel: observation.worstCaseLabel,
       kObserved: null, kSafe: null,
-      oldBasePrice: sellerData.price, newBasePrice: null,
-      sellerDiscount: sellerData.discount,
+      oldBasePrice: currentBasePrice, newBasePrice: null,
+      sellerDiscount: sellerDiscountPct,
       reason: decision.reason, dryRun,
       allRegionsJson: JSON.stringify(observation.allRegions),
     });
@@ -219,20 +265,25 @@ export async function runFloorEngineForSku(
   const kObs = "kObserved" in decision ? (decision.kObserved ?? null) : null;
   const kSf = "kSafe" in decision ? (decision.kSafe ?? null) : null;
 
-  // ── STEP 5: UPLOAD ────────────────────────────────────────────────────────
+  // ── STEP 5: UPLOAD (Seller API — только запись, не чтение!) ───────────────
   let uploadedAt: Date | undefined;
   if (!dryRun) {
     try {
       await uploadGoodsPricesTask(token, [
-        { nmID: nmId, price: newBase, discount: sellerData.discount },
+        { nmID: nmId, price: newBase, discount: sellerDiscountPct },
       ]);
       uploadedAt = new Date();
-      logger.info({ tag: TAG, nmId, oldBase: sellerData.price, newBase }, "basePrice uploaded");
+      logger.info({ tag: TAG, nmId, oldBase: currentBasePrice, newBase }, "basePrice uploaded");
 
-      // Обновить lastSuccessfulRaiseAt
+      // Обновить lastSuccessfulRaiseAt и sellerPrice в БД
       await prisma.minPriceRule.updateMany({
         where: { product: { nmId } },
         data: { lastSuccessfulRaiseAt: uploadedAt, lastCheckAt: uploadedAt },
+      });
+      // Обновить WbProduct.sellerPrice чтобы следующий прогон читал актуальное значение
+      await prisma.wbProduct.updateMany({
+        where: { nmId },
+        data: { sellerPrice: newBase },
       });
     } catch (err) {
       logger.error({ tag: TAG, nmId, err: String(err) }, "upload failed");
@@ -240,8 +291,8 @@ export async function runFloorEngineForSku(
         nmId, productId, action: "upload_failed", floorPriceRub, minBuyerPriceRub,
         worstCaseDest: observation.worstCaseDest, worstCaseLabel: observation.worstCaseLabel,
         kObserved: kObs, kSafe: kSf,
-        oldBasePrice: sellerData.price, newBasePrice: newBase,
-        sellerDiscount: sellerData.discount,
+        oldBasePrice: currentBasePrice, newBasePrice: newBase,
+        sellerDiscount: sellerDiscountPct,
         reason: `upload_error:${String(err)}`, dryRun,
         allRegionsJson: JSON.stringify(observation.allRegions),
       });
@@ -253,7 +304,7 @@ export async function runFloorEngineForSku(
   await sendTelegramAlert({
     kind: alertKind,
     nmId, floorPriceRub, minBuyerPriceRub,
-    oldBase: sellerData.price, newBase,
+    oldBase: currentBasePrice, newBase,
     worstCaseLabel: observation.worstCaseLabel ?? undefined,
     gapRub, dryRun,
   });
@@ -264,8 +315,8 @@ export async function runFloorEngineForSku(
     floorPriceRub, minBuyerPriceRub,
     worstCaseDest: observation.worstCaseDest, worstCaseLabel: observation.worstCaseLabel,
     kObserved: kObs, kSafe: kSf,
-    oldBasePrice: sellerData.price, newBasePrice: newBase,
-    sellerDiscount: sellerData.discount,
+    oldBasePrice: currentBasePrice, newBasePrice: newBase,
+    sellerDiscount: sellerDiscountPct,
     reason: decision.reason, dryRun,
     allRegionsJson: JSON.stringify(observation.allRegions),
   });
@@ -345,40 +396,50 @@ async function runPostVerify(
     return;
   }
 
-  // Повторная попытка с повышением
-  const sellerData = await fetchGoodsPriceByNmId(token, nmId).catch(() => null);
-  if (sellerData && minBuyerPriceRub != null) {
-    const sellerEff = verify.sellerEffectiveRub
-      ?? Math.round(sellerData.price * (1 - sellerData.discount / 100));
-    const retry = computeRaise({
-      minBuyerPriceRub,
-      sellerEffectiveRub: sellerEff,
-      currentBasePrice: sellerData.price,
-      sellerDiscountPct: sellerData.discount,
-      floorPriceRub,
-      bufferPct: opts.bufferPct,
-    });
+  // Повторная попытка с повышением — читаем из БД, не из Seller API
+  if (minBuyerPriceRub != null) {
+    const dbData = await readSellerDataFromDb(nmId);
+    if (dbData) {
+      const { currentBasePrice, sellerDiscountPct } = dbData;
+      const sellerEffectiveRub =
+        verify.sellerEffectiveRub ??
+        Math.round(currentBasePrice * (1 - sellerDiscountPct / 100));
 
-    if ((retry.action === "raise_full" || retry.action === "raise_partial") && retry.newBase) {
-      try {
-        await uploadGoodsPricesTask(token, [
-          { nmID: nmId, price: retry.newBase, discount: sellerData.discount },
-        ]);
-        logger.info({ tag: TAG, nmId, newBase: retry.newBase, attempt }, "retry upload OK");
-        await writeLog({
-          nmId, productId,
-          action: `retry_${attempt}_${retry.action}`,
-          floorPriceRub, minBuyerPriceRub,
-          worstCaseDest: verify.worstCaseDest, worstCaseLabel: verify.worstCaseLabel,
-          kObserved: "kObserved" in retry ? retry.kObserved ?? null : null,
-          kSafe: "kSafe" in retry ? retry.kSafe ?? null : null,
-          oldBasePrice: sellerData.price, newBasePrice: retry.newBase,
-          sellerDiscount: sellerData.discount,
-          reason: retry.reason, dryRun: false,
-          allRegionsJson: JSON.stringify(verify.allRegions),
-        });
-      } catch (err) {
-        logger.error({ tag: TAG, nmId, attempt, err: String(err) }, "retry upload failed");
+      const retry = computeRaise({
+        minBuyerPriceRub,
+        sellerEffectiveRub,
+        currentBasePrice,
+        sellerDiscountPct,
+        floorPriceRub,
+        bufferPct: opts.bufferPct,
+      });
+
+      if ((retry.action === "raise_full" || retry.action === "raise_partial") && retry.newBase) {
+        try {
+          await uploadGoodsPricesTask(token, [
+            { nmID: nmId, price: retry.newBase, discount: sellerDiscountPct },
+          ]);
+          logger.info({ tag: TAG, nmId, newBase: retry.newBase, attempt }, "retry upload OK");
+          // Обновить WbProduct.sellerPrice в БД
+          await prisma.wbProduct.updateMany({
+            where: { nmId },
+            data: { sellerPrice: retry.newBase },
+          });
+          await writeLog({
+            nmId, productId,
+            action: `retry_${attempt}_${retry.action}`,
+            floorPriceRub, minBuyerPriceRub,
+            worstCaseDest: verify.worstCaseDest, worstCaseLabel: verify.worstCaseLabel,
+            kObserved: "kObserved" in retry ? retry.kObserved ?? null : null,
+            kSafe: "kSafe" in retry ? retry.kSafe ?? null : null,
+            oldBasePrice: currentBasePrice, newBasePrice: retry.newBase,
+            sellerDiscount: sellerDiscountPct,
+            reason: retry.reason, dryRun: false,
+            allRegionsJson: JSON.stringify(verify.allRegions),
+          });
+        } catch (err) {
+          logger.error({ tag: TAG, nmId, attempt, err: String(err) }, "retry upload failed");
+        }
       }
     }
   }
