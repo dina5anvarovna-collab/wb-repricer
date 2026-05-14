@@ -34,6 +34,9 @@ import {
   runEnforcementJob,
 } from "../modules/priceEnforcement/runEnforcementJob.js";
 import { runPriceMonitorJob } from "../modules/priceMonitor/runMonitor.js";
+import { runFloorProtectionBatch } from "../modules/floorProtection/floorEngine.js";
+import { runObserveAllProducts } from "../modules/floorProtection/observeAllProducts.js";
+import { backfillPriceSnapshotsFromFloorLog } from "../modules/floorProtection/backfillFromFloorLog.js";
 import {
   fetchQuarantineGoodsPage,
   normalizeSellerApiToken,
@@ -205,6 +208,98 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/wb/status", async () => buildSellerStatusPayload());
+
+  /** Список всех подключённых кабинетов (магазинов) WB. */
+  app.get("/api/cabinets", async () => {
+    const cabinets = await prisma.sellerCabinet.findMany({
+      orderBy: { createdAt: "asc" },
+      select: {
+        id: true,
+        name: true,
+        tokenLast4: true,
+        isActive: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: { select: { products: true } },
+      },
+    });
+    return {
+      items: cabinets.map((c) => ({
+        id: c.id,
+        name: c.name,
+        tokenLast4: c.tokenLast4,
+        isActive: c.isActive,
+        productsCount: c._count.products,
+        createdAt: c.createdAt.toISOString(),
+      })),
+    };
+  });
+
+  /** Добавить новый кабинет (магазин). Не перетирает существующий — всегда создаёт новый. */
+  app.post<{ Body: { token?: string; name?: string } }>("/api/cabinets", async (req, reply) => {
+    const raw = req.body?.token;
+    const name = req.body?.name?.trim() || "Магазин";
+    if (typeof raw !== "string" || !normalizeSellerApiToken(raw)) {
+      return reply.code(400).send({ error: "Укажите непустой токен" });
+    }
+    try {
+      const trimmed = normalizeSellerApiToken(raw)!;
+      const enc = (await import("../lib/crypto/tokenVault.js")).encryptToken(trimmed, env.REPRICER_MASTER_SECRET);
+      const last4 = trimmed.slice(-4);
+      // Деактивировать прочие, новый становится активным
+      await prisma.sellerCabinet.updateMany({ data: { isActive: false } });
+      const c = await prisma.sellerCabinet.create({
+        data: { name, tokenEncrypted: enc, tokenLast4: last4, isActive: true },
+      });
+      return { ok: true, id: c.id, name: c.name, tokenLast4: c.tokenLast4 };
+    } catch (e) {
+      logger.error(e, "cabinet add failed");
+      return reply.code(500).send({ error: String(e) });
+    }
+  });
+
+  /** Сделать кабинет активным. */
+  app.post<{ Params: { id: string } }>("/api/cabinets/:id/activate", async (req, reply) => {
+    const c = await prisma.sellerCabinet.findUnique({ where: { id: req.params.id } });
+    if (!c) return reply.code(404).send({ error: "Кабинет не найден" });
+    await prisma.sellerCabinet.updateMany({ data: { isActive: false } });
+    const updated = await prisma.sellerCabinet.update({
+      where: { id: c.id },
+      data: { isActive: true },
+    });
+    return { ok: true, id: updated.id };
+  });
+
+  /** Переименовать кабинет. */
+  app.patch<{ Params: { id: string }; Body: { name?: string } }>("/api/cabinets/:id", async (req, reply) => {
+    const name = req.body?.name?.trim();
+    if (!name) return reply.code(400).send({ error: "Имя не может быть пустым" });
+    const c = await prisma.sellerCabinet.findUnique({ where: { id: req.params.id } });
+    if (!c) return reply.code(404).send({ error: "Кабинет не найден" });
+    const updated = await prisma.sellerCabinet.update({ where: { id: c.id }, data: { name } });
+    return { ok: true, id: updated.id, name: updated.name };
+  });
+
+  /** Удалить кабинет (вместе с его товарами через onDelete cascade). */
+  app.delete<{ Params: { id: string } }>("/api/cabinets/:id", async (req, reply) => {
+    const c = await prisma.sellerCabinet.findUnique({ where: { id: req.params.id } });
+    if (!c) return reply.code(404).send({ error: "Кабинет не найден" });
+    if (c.isActive) {
+      const others = await prisma.sellerCabinet.count({ where: { id: { not: c.id } } });
+      if (others === 0) {
+        return reply.code(400).send({ error: "Нельзя удалить единственный кабинет" });
+      }
+    }
+    await prisma.sellerCabinet.delete({ where: { id: c.id } });
+    // Если удалили активный — назначить активным другой (самый последний)
+    if (c.isActive) {
+      const next = await prisma.sellerCabinet.findFirst({ orderBy: { createdAt: "desc" } });
+      if (next) {
+        await prisma.sellerCabinet.update({ where: { id: next.id }, data: { isActive: true } });
+      }
+    }
+    return { ok: true };
+  });
 
   app.post<{ Body: { token?: string; name?: string } }>("/api/settings/wb-token", async (req, reply) => {
     const raw = req.body?.token;
@@ -1392,6 +1487,56 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       return { ok: true, catalogUpserted, monitor: mon };
     } catch (e) {
       logger.error(e, "run-monitoring failed");
+      return reply.code(500).send({ error: String(e) });
+    } finally {
+      await releaseSchedulerLock("monitor");
+    }
+  });
+
+  app.post("/api/jobs/run-floor-protection", async (req, reply) => {
+    const body = req.body as { dryRun?: boolean } | undefined;
+    const _rawDryRun = env.REPRICER_FLOOR_DRY_RUN.trim().toLowerCase();
+    const dryRun = typeof (body as any)?.dryRun === "boolean" ? (body as any).dryRun : !["0", "false", "no", "off"].includes(_rawDryRun);
+    const ok = await acquireSchedulerLock("floor");
+    if (!ok) return reply.code(409).send({ error: "floor lock held" });
+    try {
+      const cabinetAuth = await getActiveCabinetToken();
+      if (!cabinetAuth?.token) return reply.code(503).send({ error: "no seller token" });
+      const result = await runFloorProtectionBatch(cabinetAuth.token, {
+        dryRun,
+        bufferPct: env.REPRICER_FLOOR_BUFFER_PCT,
+        maxStepPct: env.REPRICER_FLOOR_MAX_STEP_PCT,
+        postVerifyDelayMs: env.REPRICER_FLOOR_POST_VERIFY_DELAY_MIN * 60_000,
+      });
+      return { ok: true, dryRun, ...result };
+    } catch (e) {
+      logger.error(e, "floor protection run failed");
+      return reply.code(500).send({ error: String(e) });
+    } finally {
+      await releaseSchedulerLock("floor");
+    }
+  });
+
+  /** Backfill: создаёт PriceSnapshot из последних FloorProtectionLog (без сетевых запросов). */
+  app.post("/api/jobs/backfill-snapshots", async (req, reply) => {
+    try {
+      const result = await backfillPriceSnapshotsFromFloorLog();
+      return { ok: true, ...result };
+    } catch (e) {
+      logger.error(e, "backfill snapshots failed");
+      return reply.code(500).send({ error: String(e) });
+    }
+  });
+
+  /** Наблюдение всех активных товаров: пишет PriceSnapshot для каталога. */
+  app.post("/api/jobs/observe-all", async (req, reply) => {
+    const ok = await acquireSchedulerLock("monitor");
+    if (!ok) return reply.code(409).send({ error: "observe lock held" });
+    try {
+      const result = await runObserveAllProducts({ concurrency: 3 });
+      return { ok: true, ...result };
+    } catch (e) {
+      logger.error(e, "observe all failed");
       return reply.code(500).send({ error: String(e) });
     } finally {
       await releaseSchedulerLock("monitor");

@@ -95,17 +95,19 @@ function AppRoutes() {
       <Route path="/login" element={<LoginPage />} />
       <Route element={<ProtectedLayout />}>
         <Route element={<Shell />}>
-          <Route index element={<DashboardPage />} />
-          <Route path="connect" element={<ConnectPage />} />
+          <Route index element={<PricesPage />} />
+          <Route path="prices" element={<PricesPage />} />
           <Route path="catalog" element={<CatalogPage />} />
+          <Route path="history" element={<HistoryPage />} />
+          <Route path="settings" element={<SettingsPage />} />
+          {/* Скрытые из меню, но доступные по прямой ссылке */}
+          <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="connect" element={<ConnectPage />} />
           <Route path="rules" element={<RulesPage />} />
           <Route path="monitor" element={<MonitorPage />} />
-          <Route path="history" element={<HistoryPage />} />
           <Route path="regions" element={<RegionsPage />} />
-          <Route path="settings" element={<SettingsPage />} />
           <Route path="session" element={<SessionPage />} />
           <Route path="stocks" element={<StocksPage />} />
-          <Route path="prices" element={<PricesPage />} />
           <Route path="products-api" element={<ProductsApiPage />} />
           <Route path="sync" element={<SyncHubPage />} />
           <Route path="sync-logs" element={<SyncLogsPage />} />

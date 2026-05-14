@@ -1,345 +1,377 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Check, Plus, Trash2, Pencil, Star, RefreshCw } from "lucide-react";
 import { apiFetch } from "../lib/api";
 
-type SettingsStatus = {
-  buyer: {
-    active: boolean;
-    profileDir: string;
-    lastSuccessAt: string | null;
-    lastDomSuccessAt: string | null;
-    status: string;
-  };
-  parsePolicy?: {
-    publicFirst: boolean;
-    walletParseMode: string;
-    buyerVerifyMode: string;
-  };
-  publicParsing?: {
-    buyerAuthDisabled: boolean;
-    publicOnly: boolean;
-    walletParseMode: string;
-    walletDetailsMode: string;
-  };
+type Cabinet = {
+  id: string;
+  name: string;
+  tokenLast4: string;
+  isActive: boolean;
+  productsCount: number;
+  createdAt: string;
 };
 
-type BuyerLoginStart = {
-  sessionId: string;
-  profileDir: string;
-  instruction: string;
-  cliCommand: string;
-  cliPath?: string;
-  cliExists?: boolean;
-  browser?: string;
-  hints?: string[];
-  headedLoginAvailable?: boolean;
-  autoLoginWindowSpawned?: boolean;
-  autoLoginWindowAttempted?: boolean;
-};
+type Region = { dest: string; name: string };
 
 export function SettingsPage() {
   const qc = useQueryClient();
-  const [loginPayload, setLoginPayload] = useState<BuyerLoginStart | null>(null);
-  const [intervalDraft, setIntervalDraft] = useState("");
-  const [intervalNotice, setIntervalNotice] = useState<{ kind: "ok" | "err"; text?: string } | null>(null);
-  const intervalOkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const q = useQuery({
-    queryKey: ["app-settings"],
-    queryFn: () =>
-      apiFetch<{
-        GLOBAL_PAUSE: string;
-        EMERGENCY_STOP: string;
-        MONITOR_INTERVAL_HOURS: number;
-      }>("/api/app/settings"),
+  // ─── Cabinets ────────────────────────────────────────────────────────────────
+  const cabinetsQ = useQuery({
+    queryKey: ["cabinets"],
+    queryFn: () => apiFetch<{ items: Cabinet[] }>("/api/cabinets"),
   });
 
-  const statusQ = useQuery({
-    queryKey: ["settings-status"],
-    queryFn: () => apiFetch<SettingsStatus>("/api/settings/status"),
-  });
+  const [addOpen, setAddOpen] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newToken, setNewToken] = useState("");
 
-  const patch = useMutation({
-    mutationFn: (body: Record<string, unknown>) =>
-      apiFetch("/api/app/settings", { method: "PATCH", json: body }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ["app-settings"] }),
-  });
-
-  type MonitorIntervalPatchRes = { ok: boolean; monitorIntervalHours: number };
-
-  const patchMonitorInterval = useMutation({
-    mutationFn: (monitorIntervalHours: number) =>
-      apiFetch<MonitorIntervalPatchRes>("/api/settings/monitor-interval", {
-        method: "PATCH",
-        json: { monitorIntervalHours },
-      }),
-    onSuccess: (data) => {
-      qc.setQueryData(
-        ["app-settings"],
-        (
-          old:
-            | {
-                GLOBAL_PAUSE: string;
-                EMERGENCY_STOP: string;
-                MONITOR_INTERVAL_HOURS: number;
-              }
-            | undefined,
-        ) => (old ? { ...old, MONITOR_INTERVAL_HOURS: data.monitorIntervalHours } : old),
-      );
-      setIntervalDraft(String(data.monitorIntervalHours));
-      setIntervalNotice({ kind: "ok" });
-      if (intervalOkTimerRef.current) clearTimeout(intervalOkTimerRef.current);
-      intervalOkTimerRef.current = setTimeout(() => {
-        setIntervalNotice((n) => (n?.kind === "ok" ? null : n));
-        intervalOkTimerRef.current = null;
-      }, 3500);
-    },
-    onError: (e) => {
-      setIntervalNotice({ kind: "err", text: (e as Error).message });
-    },
-  });
-
-  const buyerLoginStart = useMutation({
+  const addCabinet = useMutation({
     mutationFn: () =>
-      apiFetch<BuyerLoginStart>("/api/settings/buyer-session/login/start", { method: "POST" }),
-    onSuccess: (data) => setLoginPayload(data),
-  });
-
-  const buyerLoginFinish = useMutation({
-    mutationFn: (sessionId: string) =>
-      apiFetch("/api/settings/buyer-session/login/finish", {
+      apiFetch("/api/cabinets", {
         method: "POST",
-        json: { sessionId },
+        json: { name: newName || "Магазин", token: newToken.trim() },
       }),
     onSuccess: () => {
-      setLoginPayload(null);
-      void qc.invalidateQueries({ queryKey: ["settings-status"] });
+      setAddOpen(false);
+      setNewName("");
+      setNewToken("");
+      void qc.invalidateQueries({ queryKey: ["cabinets"] });
+      void qc.invalidateQueries({ queryKey: ["wb-status"] });
     },
   });
 
-  const loadedHours = q.data?.MONITOR_INTERVAL_HOURS;
+  const activateCabinet = useMutation({
+    mutationFn: (id: string) => apiFetch(`/api/cabinets/${id}/activate`, { method: "POST" }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["cabinets"] });
+      void qc.invalidateQueries({ queryKey: ["floor-region-prices"] });
+    },
+  });
+
+  const deleteCabinet = useMutation({
+    mutationFn: (id: string) => apiFetch(`/api/cabinets/${id}`, { method: "DELETE" }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["cabinets"] }),
+  });
+
+  const renameCabinet = useMutation({
+    mutationFn: ({ id, name }: { id: string; name: string }) =>
+      apiFetch(`/api/cabinets/${id}`, { method: "PATCH", json: { name } }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["cabinets"] }),
+  });
+
+  const syncCatalog = useMutation({
+    mutationFn: () => apiFetch("/api/wb/sync", { method: "POST", json: {} }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["floor-region-prices"] });
+      void qc.invalidateQueries({ queryKey: ["cabinets"] });
+    },
+  });
+
+  // ─── Regions ─────────────────────────────────────────────────────────────────
+  const regionsQ = useQuery({
+    queryKey: ["regions"],
+    queryFn: () => apiFetch<{ items: Region[] }>("/api/regions"),
+  });
+
+  const settingsQ = useQuery({
+    queryKey: ["app-settings"],
+    queryFn: () => apiFetch<{ SELECTED_REGION_DESTS: string[] }>("/api/app/settings"),
+  });
+
+  const [selectedRegions, setSelectedRegions] = useState<string[] | null>(null);
   useEffect(() => {
-    if (loadedHours !== undefined) {
-      setIntervalDraft(String(loadedHours));
+    if (settingsQ.data?.SELECTED_REGION_DESTS && selectedRegions == null) {
+      setSelectedRegions([...settingsQ.data.SELECTED_REGION_DESTS]);
     }
-  }, [loadedHours]);
+  }, [settingsQ.data?.SELECTED_REGION_DESTS, selectedRegions]);
 
-  useEffect(() => {
-    return () => {
-      if (intervalOkTimerRef.current) clearTimeout(intervalOkTimerRef.current);
-    };
-  }, []);
+  const regionsDirty = useMemo(() => {
+    if (selectedRegions == null) return false;
+    const a = [...(settingsQ.data?.SELECTED_REGION_DESTS ?? [])].sort().join(",");
+    const b = [...selectedRegions].sort().join(",");
+    return a !== b;
+  }, [settingsQ.data?.SELECTED_REGION_DESTS, selectedRegions]);
 
-  if (q.isLoading) return <p className="text-[#8b93a7]">Загрузка…</p>;
-  const s = q.data!;
-  const buyer = statusQ.data?.buyer;
-  const buyerAuthOff = statusQ.data?.publicParsing?.buyerAuthDisabled ?? false;
+  const saveRegions = useMutation({
+    mutationFn: () =>
+      apiFetch("/api/app/settings", {
+        method: "PATCH",
+        json: { selectedRegionDests: selectedRegions ?? [] },
+      }),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["app-settings"] });
+      void qc.invalidateQueries({ queryKey: ["floor-region-prices"] });
+    },
+  });
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
-      <h1 className="text-2xl font-semibold text-white">Настройки</h1>
-
-      <div className="space-y-4 rounded-xl border border-[#252a33] bg-[#13161c] p-5">
-        <h2 className="text-lg font-medium text-white">WB Покупатель (витрина / Кошелёк)</h2>
-        <p className="text-sm text-[#8b93a7]">
-          {buyerAuthOff ? (
-            <>
-              Включён режим только публичного парсинга (без buyer-login). Карточка и popup детализации; ephemeral-профиль
-              браузера без сохранённых cookies.
-            </>
-          ) : (
-            <>
-              По умолчанию сервер использует <strong className="text-[#c4c9d4]">public-first</strong>: публичная карточка
-              и popup детализации; buyer-login и импорт cookies — опциональный fallback. Сессия покупателя не обязательна
-              для мониторинга.
-            </>
-          )}
+    <div className="mx-auto max-w-3xl space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold text-white md:text-2xl">Настройки</h1>
+        <p className="mt-0.5 text-xs text-[#8b93a7] md:text-sm">
+          Магазины WB, регионы мониторинга
         </p>
-        {statusQ.data?.parsePolicy ? (
-          <p className="text-xs text-[#8b93a7]">
-            .env: REPRICER_WALLET_PARSE_MODE={statusQ.data.parsePolicy.walletParseMode}, buyer verify=
-            {statusQ.data.parsePolicy.buyerVerifyMode}, public-first:{" "}
-            <span className={statusQ.data.parsePolicy.publicFirst ? "text-emerald-300" : "text-amber-200"}>
-              {statusQ.data.parsePolicy.publicFirst ? "да" : "нет"}
-            </span>
-          </p>
-        ) : null}
-        {buyerAuthOff ? (
-          <p className="rounded-lg border border-[#252a33] bg-[#0c0e12] px-3 py-2 text-sm text-[#c4c9d4]">
-            Buyer-login отключён конфигурацией. Чтобы вернуть импорт профиля и CLI, задайте{" "}
-            <code className="text-[#8b93a7]">REPRICER_DISABLE_BUYER_AUTH=false</code> и перезапустите сервер.
-          </p>
-        ) : statusQ.isLoading ? (
-          <p className="text-sm text-[#8b93a7]">Проверка сессии…</p>
-        ) : buyer?.active ? (
-          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
-            Сессия активна. Профиль: <code className="text-xs text-emerald-200">{buyer.profileDir}</code>
-            {buyer.lastDomSuccessAt ? (
-              <span className="mt-1 block text-xs text-emerald-200/90">
-                Последний успешный DOM: {buyer.lastDomSuccessAt}
-              </span>
-            ) : null}
-          </div>
-        ) : (
-          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-            Активной сессии нет (status: {buyer?.status ?? "—"}). Запустите вход по шагам ниже на{" "}
-            <strong>той же машине</strong>, где крутится сервер repricer (не в браузере на телефоне).
-          </div>
-        )}
-
-        {!buyerAuthOff ? (
-          <>
-            <p className="text-xs text-[#8b93a7]">
-              Кнопка ниже не «рисует» вход внутри вкладки: на этой же машине должен запуститься настоящий Chromium/Chrome
-              (на macOS он стартует сам в фоне; иначе — скопируйте команду в Terminal).
-            </p>
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                disabled={buyerLoginStart.isPending}
-                onClick={() => buyerLoginStart.mutate()}
-                className="rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-40"
-              >
-                {buyerLoginStart.isPending ? "Готовим команду…" : "1. Получить команду для входа в WB"}
-              </button>
-              {loginPayload ? (
-                <button
-                  type="button"
-                  disabled={buyerLoginFinish.isPending}
-                  onClick={() => buyerLoginFinish.mutate(loginPayload.sessionId)}
-                  className="rounded-lg bg-emerald-600 px-3 py-2 text-sm text-white hover:bg-emerald-500 disabled:opacity-40"
-                >
-                  {buyerLoginFinish.isPending ? "Сохранение…" : "2. Подтвердить вход (после логина в браузере)"}
-                </button>
-              ) : null}
-            </div>
-
-            {buyerLoginStart.isError ? (
-              <p className="text-sm text-red-400">{(buyerLoginStart.error as Error).message}</p>
-            ) : null}
-            {buyerLoginFinish.isError ? (
-              <p className="text-sm text-red-400">{(buyerLoginFinish.error as Error).message}</p>
-            ) : null}
-
-            {loginPayload?.hints && loginPayload.hints.length > 0 ? (
-              <ul className="list-inside list-disc space-y-1 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100">
-                {loginPayload.hints.map((h, i) => (
-                  <li key={i}>{h}</li>
-                ))}
-              </ul>
-            ) : null}
-
-            {loginPayload?.autoLoginWindowSpawned ? (
-              <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-100">
-                Запущено окно браузера для входа (процесс отделён от вкладки с настройками). Проверьте Dock / Cmd+Tab.
-                После входа в WB нажмите «Подтвердить вход».
-              </p>
-            ) : null}
-            {loginPayload ? (
-              <div className="space-y-2 rounded-lg border border-[#252a33] bg-[#0c0e12] p-3 text-sm text-[#c4c9d4]">
-                <p className="text-[#8b93a7]">{loginPayload.instruction}</p>
-                <p className="text-xs text-[#8b93a7]">
-                  sessionId: {loginPayload.sessionId}
-                  {loginPayload.browser ? ` · браузер: ${loginPayload.browser}` : null}
-                  {loginPayload.cliExists === false ? (
-                    <span className="ml-2 text-red-300">CLI не собран — см. подсказки выше</span>
-                  ) : null}
-                </p>
-                <div className="flex flex-wrap items-center gap-2">
-                  <pre className="max-h-40 flex-1 overflow-auto whitespace-pre-wrap break-all rounded bg-black/40 p-2 text-xs">
-                    {loginPayload.cliCommand}
-                  </pre>
-                  <button
-                    type="button"
-                    className="shrink-0 rounded border border-[#252a33] px-2 py-1 text-xs text-[#c4c9d4] hover:bg-white/5"
-                    onClick={() => void navigator.clipboard.writeText(loginPayload.cliCommand)}
-                  >
-                    Копировать
-                  </button>
-                </div>
-                <p className="text-xs text-[#8b93a7]">
-                  Если браузер не стартует: в корне проекта один раз{" "}
-                  <code className="text-[#c4c9d4]">npm run build && npx playwright install chromium</code>, затем снова
-                  «Получить команду». Для Chrome задайте в <code className="text-[#c4c9d4]">.env</code>:{" "}
-                  <code className="text-[#c4c9d4]">REPRICER_DOM_BROWSER=chrome</code>.
-                </p>
-              </div>
-            ) : null}
-          </>
-        ) : null}
       </div>
 
-      <div className="space-y-4 rounded-xl border border-[#252a33] bg-[#13161c] p-5">
-        <h2 className="text-lg font-medium text-white">Интервал парсинга</h2>
-        <p className="text-sm text-[#8b93a7]">
-          Укажите, как часто запускать мониторинг автоматически.
-        </p>
-        <p className="text-sm text-[#8b93a7]">
-          Текущее значение в настройках:{" "}
-          <strong className="text-white">{s.MONITOR_INTERVAL_HOURS}</strong> ч
-        </p>
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs text-[#8b93a7]">Интервал</span>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={0.5}
-                max={24}
-                step={0.5}
-                value={intervalDraft}
-                onChange={(e) => {
-                  setIntervalDraft(e.target.value);
-                  setIntervalNotice(null);
-                }}
-                className="w-28 rounded-lg border border-[#252a33] bg-[#0c0e12] px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
-              />
-              <span className="text-sm text-[#c4c9d4]">часов</span>
-            </div>
-          </label>
+      {/* ─── Cabinets section ──────────────────────────────────── */}
+      <section className="rounded-xl border border-[#252a33] bg-[#13161c]">
+        <div className="flex items-center justify-between border-b border-[#252a33] px-4 py-3">
+          <div>
+            <h2 className="text-sm font-semibold text-white">Магазины Wildberries</h2>
+            <p className="text-xs text-[#8b93a7]">Активный магазин используется для защиты пола</p>
+          </div>
           <button
             type="button"
-            disabled={patchMonitorInterval.isPending}
-            onClick={() => {
-              const raw = intervalDraft.trim().replace(",", ".");
-              const v = Number(raw);
-              if (!Number.isFinite(v)) {
-                setIntervalNotice({ kind: "err", text: "Введите число" });
-                return;
-              }
-              patchMonitorInterval.mutate(v);
-            }}
-            className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-40"
+            onClick={() => setAddOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-500"
           >
-            {patchMonitorInterval.isPending ? "Сохранение…" : "Сохранить"}
+            <Plus className="h-4 w-4" />
+            Добавить
           </button>
         </div>
-        {intervalNotice?.kind === "ok" ? (
-          <p className="text-sm text-emerald-400">Сохранено</p>
+
+        <div className="divide-y divide-[#252a33]">
+          {cabinetsQ.isLoading ? (
+            <p className="px-4 py-4 text-sm text-[#8b93a7]">Загрузка…</p>
+          ) : (cabinetsQ.data?.items ?? []).length === 0 ? (
+            <p className="px-4 py-4 text-sm text-[#8b93a7]">Нет подключённых магазинов. Добавьте первый.</p>
+          ) : (
+            (cabinetsQ.data?.items ?? []).map((c) => (
+              <CabinetRow
+                key={c.id}
+                cabinet={c}
+                onActivate={() => activateCabinet.mutate(c.id)}
+                onDelete={() => {
+                  if (confirm(`Удалить магазин «${c.name}» и все его товары?`)) deleteCabinet.mutate(c.id);
+                }}
+                onRename={(name) => renameCabinet.mutate({ id: c.id, name })}
+                busy={activateCabinet.isPending || deleteCabinet.isPending}
+              />
+            ))
+          )}
+        </div>
+
+        {(cabinetsQ.data?.items ?? []).some((c) => c.isActive) ? (
+          <div className="flex items-center justify-between border-t border-[#252a33] px-4 py-3">
+            <span className="text-xs text-[#8b93a7]">
+              Синхронизировать каталог активного магазина (загрузка товаров через WB API)
+            </span>
+            <button
+              type="button"
+              onClick={() => syncCatalog.mutate()}
+              disabled={syncCatalog.isPending}
+              className="flex items-center gap-1.5 rounded-lg border border-[#323842] px-3 py-1.5 text-sm text-[#c4c9d4] hover:bg-white/5 disabled:opacity-40"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${syncCatalog.isPending ? "animate-spin" : ""}`} />
+              Синхронизировать
+            </button>
+          </div>
         ) : null}
-        {intervalNotice?.kind === "err" ? (
-          <p className="text-sm text-red-400">{intervalNotice.text ?? "Ошибка сохранения"}</p>
+
+        {syncCatalog.isSuccess ? (
+          <div className="mx-4 mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
+            Каталог обновлён
+          </div>
         ) : null}
+        {syncCatalog.isError ? (
+          <div className="mx-4 mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+            {(syncCatalog.error as Error).message}
+          </div>
+        ) : null}
+      </section>
+
+      {/* ─── Add cabinet dialog ─────────────────────────────────── */}
+      {addOpen ? (
+        <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4" onClick={() => setAddOpen(false)}>
+          <div className="w-full max-w-md rounded-xl border border-[#252a33] bg-[#13161c] p-5" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-base font-semibold text-white">Подключить магазин WB</h3>
+            <p className="mt-1 text-xs text-[#8b93a7]">
+              API-токен категории «Цены и скидки» из ЛК продавца
+            </p>
+            <label className="mt-4 flex flex-col gap-1 text-xs">
+              <span className="text-[#8b93a7]">Название магазина</span>
+              <input
+                type="text"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="Например: Основной магазин"
+                className="rounded-lg border border-[#323842] bg-[#0d0f14] px-3 py-2 text-sm text-white placeholder:text-[#5a6170] focus:border-blue-500 focus:outline-none"
+              />
+            </label>
+            <label className="mt-3 flex flex-col gap-1 text-xs">
+              <span className="text-[#8b93a7]">API-токен</span>
+              <textarea
+                value={newToken}
+                onChange={(e) => setNewToken(e.target.value)}
+                rows={3}
+                placeholder="Вставьте токен…"
+                className="rounded-lg border border-[#323842] bg-[#0d0f14] px-3 py-2 text-sm text-white placeholder:text-[#5a6170] focus:border-blue-500 focus:outline-none"
+              />
+            </label>
+            {addCabinet.isError ? (
+              <p className="mt-3 text-sm text-red-300">{(addCabinet.error as Error).message}</p>
+            ) : null}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setAddOpen(false)}
+                className="rounded-lg border border-[#323842] px-3 py-2 text-sm text-[#c4c9d4] hover:bg-white/5"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => addCabinet.mutate()}
+                disabled={!newToken.trim() || addCabinet.isPending}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-500 disabled:opacity-40"
+              >
+                {addCabinet.isPending ? "Сохранение…" : "Подключить"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ─── Regions section ────────────────────────────────────── */}
+      <section className="rounded-xl border border-[#252a33] bg-[#13161c]">
+        <div className="border-b border-[#252a33] px-4 py-3">
+          <h2 className="text-sm font-semibold text-white">Регионы мониторинга</h2>
+          <p className="text-xs text-[#8b93a7]">
+            Города/склады, по которым проверяется цена с WB Кошельком (worst-case по регионам = цена для защиты пола)
+          </p>
+        </div>
+
+        {regionsQ.isLoading || settingsQ.isLoading ? (
+          <p className="px-4 py-4 text-sm text-[#8b93a7]">Загрузка…</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 gap-1 p-3 sm:grid-cols-2">
+              {(regionsQ.data?.items ?? []).map((r) => {
+                const checked = selectedRegions?.includes(r.dest) ?? false;
+                return (
+                  <label
+                    key={r.dest}
+                    className={`flex cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-sm transition-colors ${
+                      checked ? "bg-blue-600/10 text-blue-100" : "text-[#c4c9d4] hover:bg-white/5"
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() =>
+                        setSelectedRegions((s) => {
+                          const cur = s ?? [];
+                          return cur.includes(r.dest) ? cur.filter((x) => x !== r.dest) : [...cur, r.dest];
+                        })
+                      }
+                      className="h-4 w-4 accent-blue-500"
+                    />
+                    <span>{r.name || r.dest}</span>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="flex items-center justify-between border-t border-[#252a33] px-4 py-3">
+              <span className="text-xs text-[#8b93a7]">
+                {regionsDirty ? "Есть несохранённые изменения" : "Регионы сохранены"}
+              </span>
+              <button
+                type="button"
+                onClick={() => saveRegions.mutate()}
+                disabled={!regionsDirty || saveRegions.isPending}
+                className="rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-500 disabled:opacity-40"
+              >
+                {saveRegions.isPending ? "Сохранение…" : "Сохранить"}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function CabinetRow({
+  cabinet,
+  onActivate,
+  onDelete,
+  onRename,
+  busy,
+}: {
+  cabinet: Cabinet;
+  onActivate: () => void;
+  onDelete: () => void;
+  onRename: (name: string) => void;
+  busy: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [nameDraft, setNameDraft] = useState(cabinet.name);
+
+  return (
+    <div className="flex flex-wrap items-center gap-3 px-4 py-3">
+      <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full ${cabinet.isActive ? "bg-blue-500/20 text-blue-300" : "bg-[#252a33] text-[#5a6170]"}`}>
+        <Star className={`h-3.5 w-3.5 ${cabinet.isActive ? "fill-current" : ""}`} />
       </div>
 
-      <div className="space-y-4 rounded-xl border border-[#252a33] bg-[#13161c] p-5">
-        <label className="flex items-center gap-2 text-sm text-[#e8eaef]">
+      <div className="min-w-0 flex-1">
+        {editing ? (
           <input
-            type="checkbox"
-            checked={s.GLOBAL_PAUSE === "true" || s.GLOBAL_PAUSE === "1"}
-            onChange={(e) => patch.mutate({ GLOBAL_PAUSE: e.target.checked })}
+            type="text"
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && nameDraft.trim()) {
+                onRename(nameDraft.trim());
+                setEditing(false);
+              }
+              if (e.key === "Escape") {
+                setNameDraft(cabinet.name);
+                setEditing(false);
+              }
+            }}
+            onBlur={() => {
+              if (nameDraft.trim() && nameDraft.trim() !== cabinet.name) onRename(nameDraft.trim());
+              setEditing(false);
+            }}
+            autoFocus
+            className="w-full rounded border border-[#323842] bg-[#0d0f14] px-2 py-1 text-sm text-white focus:border-blue-500 focus:outline-none"
           />
-          Глобальная пауза защиты
-        </label>
-        <label className="flex items-center gap-2 text-sm text-[#e8eaef]">
-          <input
-            type="checkbox"
-            checked={s.EMERGENCY_STOP === "true" || s.EMERGENCY_STOP === "1"}
-            onChange={(e) => patch.mutate({ EMERGENCY_STOP: e.target.checked })}
-          />
-          Аварийный стоп
-        </label>
+        ) : (
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-white">{cabinet.name}</span>
+            <button type="button" onClick={() => setEditing(true)} className="text-[#5a6170] hover:text-white">
+              <Pencil className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+        <div className="text-[10px] text-[#5a6170]">
+          токен …{cabinet.tokenLast4} · товаров {cabinet.productsCount}
+          {cabinet.isActive ? " · активный" : ""}
+        </div>
       </div>
+
+      {!cabinet.isActive ? (
+        <button
+          type="button"
+          onClick={onActivate}
+          disabled={busy}
+          className="flex items-center gap-1 rounded border border-[#323842] px-2.5 py-1 text-xs text-[#c4c9d4] hover:bg-white/5 disabled:opacity-40"
+        >
+          <Check className="h-3 w-3" />
+          Сделать активным
+        </button>
+      ) : null}
+      <button
+        type="button"
+        onClick={onDelete}
+        disabled={busy}
+        className="rounded border border-[#3a2a2e] px-2 py-1 text-xs text-red-300 hover:bg-red-500/10 disabled:opacity-40"
+        title="Удалить кабинет"
+      >
+        <Trash2 className="h-3.5 w-3.5" />
+      </button>
     </div>
   );
 }

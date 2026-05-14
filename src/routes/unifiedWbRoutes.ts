@@ -334,5 +334,107 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
     };
   });
 
+  app.get("/api/floor/region-prices", async () => {
+    const products = await prisma.wbProduct.findMany({
+      where: { isActive: true },
+      orderBy: { nmId: "asc" },
+      select: {
+        nmId: true,
+        title: true,
+        sellerPrice: true,
+        sellerDiscount: true,
+        discountedPriceRub: true,
+        stock: true,
+        minPriceRule: {
+          select: {
+            minAllowedFinalPrice: true,
+            controlEnabled: true,
+          },
+        },
+      },
+    });
+    const nmIds = products.map((p) => p.nmId);
+    const logs = await prisma.floorProtectionLog.findMany({
+      where: { nmId: { in: nmIds }, allRegionsJson: { not: null } },
+      orderBy: { createdAt: "desc" },
+      select: {
+        nmId: true,
+        action: true,
+        kObserved: true,
+        floorPriceRub: true,
+        minBuyerPriceRub: true,
+        oldBasePrice: true,
+        newBasePrice: true,
+        allRegionsJson: true,
+        dryRun: true,
+        createdAt: true,
+      },
+    });
+    const latestLog = new Map<number, (typeof logs)[0]>();
+    for (const l of logs) {
+      if (!latestLog.has(l.nmId)) latestLog.set(l.nmId, l);
+    }
+    return {
+      items: products.map((p) => {
+        const log = latestLog.get(p.nmId) ?? null;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let regions: any[] = [];
+        if (log?.allRegionsJson) {
+          try { regions = JSON.parse(log.allRegionsJson); } catch { /* noop */ }
+        }
+        return {
+          nmId: p.nmId,
+          title: p.title,
+          basePrice: p.sellerPrice,
+          sellerDiscount: p.sellerDiscount,
+          discountedPrice: p.discountedPriceRub,
+          stock: p.stock ?? 0,
+          floorPrice: p.minPriceRule?.minAllowedFinalPrice ?? null,
+          controlEnabled: p.minPriceRule?.controlEnabled ?? false,
+          floorLog: log ? {
+            action: log.action,
+            kObserved: log.kObserved,
+            minBuyerPriceRub: log.minBuyerPriceRub,
+            floorPriceRub: log.floorPriceRub,
+            oldBasePrice: log.oldBasePrice,
+            newBasePrice: log.newBasePrice,
+            dryRun: log.dryRun,
+            updatedAt: log.createdAt.toISOString(),
+            regions,
+          } : null,
+        };
+      }),
+    };
+  });
+
+  /** Массовое включение/отключение мониторинга для списка nmId. */
+  app.post<{ Body: { nmIds?: number[]; enabled?: boolean } }>("/api/catalog/bulk-monitor", async (req, reply) => {
+    const nmIds = Array.isArray(req.body?.nmIds) ? req.body!.nmIds!.filter((x) => Number.isFinite(x)) : [];
+    const enabled = !!req.body?.enabled;
+    if (nmIds.length === 0) return reply.code(400).send({ error: "nmIds пуст" });
+    const products = await prisma.wbProduct.findMany({
+      where: { nmId: { in: nmIds } },
+      select: { id: true, nmId: true, minPriceRule: { select: { minAllowedFinalPrice: true } } },
+    });
+    let updated = 0;
+    let createdWithDefault = 0;
+    for (const p of products) {
+      if (p.minPriceRule) {
+        await prisma.minPriceRule.update({
+          where: { productId: p.id },
+          data: { controlEnabled: enabled },
+        });
+        updated++;
+      } else if (enabled) {
+        // создаём правило с минимальным флором = 1 ₽ (пользователь задаст позже)
+        await prisma.minPriceRule.create({
+          data: { productId: p.id, minAllowedFinalPrice: 1, controlEnabled: true },
+        });
+        createdWithDefault++;
+      }
+    }
+    return { ok: true, updated, createdWithDefault, total: products.length };
+  });
+
   logger.info("unified WB routes registered (/api/auth/*, /api/products, /api/sync/*, …)");
 }

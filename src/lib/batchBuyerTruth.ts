@@ -76,6 +76,19 @@ export function computeBatchBuyerTruth(input: {
     };
   }
 
+  // card.wb.ru возвращает разные wallet-цены по регионам (это норма WB),
+  // поэтому считаем такой источник авторитетным и пропускаем cross-region spread check.
+  if (snaps.every((s) => s.walletSource === "card_wb_public")) {
+    const wallets = snaps.map(rubSample).filter((v): v is number => v != null);
+    if (wallets.length > 0) {
+      return {
+        batchVerificationStatus: "VERIFIED",
+        batchVerificationReason: "card_wb_public",
+        effectiveWalletRub: Math.min(...wallets),
+      };
+    }
+  }
+
   const parts: string[] = [];
   let anyWeakParse = false;
   let anyAmbiguous = false;
