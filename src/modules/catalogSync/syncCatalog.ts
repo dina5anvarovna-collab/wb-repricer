@@ -95,6 +95,7 @@ export async function syncCatalogFromSeller(
 ): Promise<{
   upserted: number;
   pages: number;
+  pricesError?: string;
   contentPagesOk: number;
   contentPagesFailed: number;
   enrichedFromContent: number;
@@ -104,37 +105,44 @@ export async function syncCatalogFromSeller(
   let offset = 0;
   let upserted = 0;
   let pages = 0;
-  for (;;) {
-    const { rows } = await fetchSellerPricesPage(token, offset, PAGE);
-    pages += 1;
-    if (!rows.length) break;
-    for (const r of rows) {
-      if (!Number.isFinite(r.nmId) || r.nmId <= 0) continue;
-      const discountedPriceRub = discountedAfterSellerDiscount(r.price, r.discount);
-      const fallbackTitle = `Товар ${r.nmId}`;
-      await prisma.wbProduct.upsert({
-        where: { cabinetId_nmId: { cabinetId, nmId: r.nmId } },
-        create: {
-          cabinetId,
-          nmId: r.nmId,
-          vendorCode: r.vendorCode ?? null,
-          title: fallbackTitle,
-          sellerPrice: r.price ?? null,
-          sellerDiscount: r.discount ?? null,
-          discountedPriceRub,
-        },
-        update: {
-          vendorCode: r.vendorCode ?? null,
-          sellerPrice: r.price ?? null,
-          sellerDiscount: r.discount ?? null,
-          discountedPriceRub,
-        },
-      });
-      upserted += 1;
+  let pricesError: string | undefined;
+
+  try {
+    for (;;) {
+      const { rows } = await fetchSellerPricesPage(token, offset, PAGE);
+      pages += 1;
+      if (!rows.length) break;
+      for (const r of rows) {
+        if (!Number.isFinite(r.nmId) || r.nmId <= 0) continue;
+        const discountedPriceRub = discountedAfterSellerDiscount(r.price, r.discount);
+        const fallbackTitle = `Товар ${r.nmId}`;
+        await prisma.wbProduct.upsert({
+          where: { cabinetId_nmId: { cabinetId, nmId: r.nmId } },
+          create: {
+            cabinetId,
+            nmId: r.nmId,
+            vendorCode: r.vendorCode ?? null,
+            title: fallbackTitle,
+            sellerPrice: r.price ?? null,
+            sellerDiscount: r.discount ?? null,
+            discountedPriceRub,
+          },
+          update: {
+            vendorCode: r.vendorCode ?? null,
+            sellerPrice: r.price ?? null,
+            sellerDiscount: r.discount ?? null,
+            discountedPriceRub,
+          },
+        });
+        upserted += 1;
+      }
+      if (rows.length < PAGE) break;
+      offset += PAGE;
+      await new Promise((r) => setTimeout(r, PAGE_PAUSE_MS));
     }
-    if (rows.length < PAGE) break;
-    offset += PAGE;
-    await new Promise((r) => setTimeout(r, PAGE_PAUSE_MS));
+  } catch (e) {
+    pricesError = e instanceof Error ? e.message : String(e);
+    logger.warn({ cabinetId, pricesError }, "catalog sync: prices API failed — continuing with content and stocks");
   }
 
   let contentPagesOk = 0;
@@ -263,6 +271,7 @@ export async function syncCatalogFromSeller(
   return {
     upserted,
     pages,
+    pricesError,
     contentPagesOk,
     contentPagesFailed,
     enrichedFromContent,

@@ -90,18 +90,21 @@ export async function runUnifiedSync(scope: "all" | "stocks" | "prices"): Promis
     if (scope === "all" || scope === "stocks") {
       snap.stocks = (await snapshotStocksOnly(auth.cabinetId, scope === "all" ? "sync_all" : "sync_stocks")).stocks;
     }
+    const syncOk = !r.pricesError;
     await db.syncRunLog.update({
       where: { id: log.id },
       data: {
-        status: "done",
+        status: syncOk ? "done" : "done_partial",
         finishedAt: new Date(),
         message: JSON.stringify({ ...r, snapshot: snap }),
+        ...(r.pricesError ? { errorMessage: r.pricesError } : {}),
       },
     });
-    logger.info({ tag: TAG, logId: log.id, upserted: r.upserted, snap }, "unified sync done");
+    logger.info({ tag: TAG, logId: log.id, upserted: r.upserted, snap, pricesError: r.pricesError }, "unified sync done");
     return {
       logId: log.id,
-      ok: true,
+      ok: syncOk,
+      message: r.pricesError,
       upserted: r.upserted,
       snapshotPrices: snap.prices,
       snapshotStocks: snap.stocks,
