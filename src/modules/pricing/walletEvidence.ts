@@ -29,6 +29,7 @@ export type WalletEvidence = {
 };
 
 export function normalizeWalletParseStatus(raw: string | null | undefined): WalletEvidenceParseStatus {
-  return raw === "loaded_wallet_confirmed" ? "success" : "unsafe";
+  // loaded_showcase_only: товар спаршен успешно, просто без скидки кошелька
+  return raw === "loaded_wallet_confirmed" || raw === "loaded_showcase_only" ? "success" : "unsafe";
 }
 

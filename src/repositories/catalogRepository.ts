@@ -14,6 +14,8 @@ export type CatalogListQuery = {
   parseFailed?: boolean;
   /** true = только с buyerParseEnabled, false = только отключённые от парсинга */
   buyerParseEnabled?: boolean;
+  /** Фильтр по кабинету — если не задан, показываются все товары */
+  cabinetId?: string;
   limit: number;
   offset: number;
   sortBy: "nmId" | "title" | "updatedAt" | "lastMonitorAt";
@@ -22,6 +24,9 @@ export type CatalogListQuery = {
 
 function buildWhere(q: CatalogListQuery): Prisma.WbProductWhereInput {
   const and: Prisma.WbProductWhereInput[] = [];
+  if (q.cabinetId) {
+    and.push({ cabinetId: q.cabinetId });
+  }
   if (q.search?.trim()) {
     const s = q.search.trim();
     const n = Number(s);
@@ -106,10 +111,10 @@ export async function listProductsForCatalog(q: CatalogListQuery) {
 }
 
 /** Уникальные бренды для фильтра в UI (не пустые) */
-export async function listDistinctBrands(limit = 500): Promise<string[]> {
+export async function listDistinctBrands(limit = 500, cabinetId?: string): Promise<string[]> {
   const rows = await prisma.wbProduct.groupBy({
     by: ["brand"],
-    where: { brand: { not: null } },
+    where: { brand: { not: null }, ...(cabinetId ? { cabinetId } : {}) },
     orderBy: { brand: "asc" },
     take: limit,
   });

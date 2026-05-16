@@ -242,7 +242,9 @@ export function resolveObservedBuyerPrices(input: {
       ? "product_page_wallet_selector"
       : domWalletObserved != null
         ? "product_page_wallet_selector_unconfirmed"
-        : "unavailable";
+        : parseStatusRaw === "loaded_showcase_only"
+          ? "product_page_showcase_only"
+          : "unavailable";
   let parseMode: ResolvedObservedBuyerPrices["priceParseMode"] =
     domWalletVerifiedRub != null
       ? "dom_wallet_only"

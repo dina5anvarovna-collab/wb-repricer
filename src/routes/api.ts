@@ -787,14 +787,17 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
     const q = req.query as { limit?: string; offset?: string };
     const limit = parseQueryLimit(q.limit, 50, 500);
     const offset = parseQueryOffset(q.offset);
+    const activeCabinet = await prisma.sellerCabinet.findFirst({ where: { isActive: true }, select: { id: true } });
+    const cabinetFilter = activeCabinet ? { cabinetId: activeCabinet.id } : {};
     const [rows, total, selectedDests] = await Promise.all([
       prisma.wbProduct.findMany({
+        where: cabinetFilter,
         take: limit,
         skip: offset,
         orderBy: { nmId: "asc" },
         include: { minPriceRule: true },
       }),
-      prisma.wbProduct.count(),
+      prisma.wbProduct.count({ where: cabinetFilter }),
       getSelectedRegionDests(),
     ]);
     const items = await enrichProductsForTable(rows, selectedDests);
@@ -810,6 +813,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: "Некорректные query-параметры", zod: parsed.error.flatten() });
     }
     const q = parsed.data;
+    const activeCabinet = await prisma.sellerCabinet.findFirst({ where: { isActive: true }, select: { id: true } });
     const { rows, total } = await listProductsForCatalog({
       search: q.search,
       evaluationStatus: q.evaluationStatus,
@@ -822,6 +826,7 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
       parseFailed: q.parseFailed === "true",
       buyerParseEnabled:
         q.buyerParse === "true" ? true : q.buyerParse === "false" ? false : undefined,
+      cabinetId: activeCabinet?.id,
       limit: q.limit ?? 50,
       offset: q.offset ?? 0,
       sortBy: q.sortBy ?? "nmId",
@@ -860,7 +865,8 @@ export async function registerApiRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/api/catalog/brands", async () => {
-    const items = await listDistinctBrands(400);
+    const activeCabinet = await prisma.sellerCabinet.findFirst({ where: { isActive: true }, select: { id: true } });
+    const items = await listDistinctBrands(400, activeCabinet?.id);
     return { items };
   });
 

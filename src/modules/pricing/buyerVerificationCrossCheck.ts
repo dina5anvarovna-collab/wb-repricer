@@ -21,7 +21,18 @@ const WEAK_PARSE_STATUSES = new Set([
   "parse_failed",
   "auth_required",
   "loaded_no_price",
-  "loaded_showcase_only",
+  // loaded_showcase_only исключён: товар реально спаршен, просто без скидки кошелька
+]);
+
+/** Блокеры, критичные для showcase-only товаров (SPP-блокеры не применяются). */
+const SHOWCASE_ONLY_CRITICAL_BLOCKERS = new Set([
+  "region_price_ambiguous",
+  "region_not_confirmed",
+  "dest_not_applied",
+  "dest_mismatch",
+  "nmid_mismatch",
+  "showcase_vs_seller_anomaly",
+  "showcase_jump_anomaly",
 ]);
 
 export type BuyerDomCrossCheckInput = {
@@ -84,10 +95,20 @@ export function canPersistVerifiedWalletTruth(input: {
   regionPriceAmbiguous: boolean | null | undefined;
   parseStatus: string | null | undefined;
 }): boolean {
+  const ps = typeof input.parseStatus === "string" ? input.parseStatus : "";
+
+  // Showcase-only: нет скидки кошелька, но витринная цена реальна — разрешаем сохранение.
+  // SPP-блокеры не применяются (для showcase_only SPP не релевантен).
+  if (ps === "loaded_showcase_only") {
+    return (
+      !input.blockedBySafetyRule.some((b) => SHOWCASE_ONLY_CRITICAL_BLOCKERS.has(b)) &&
+      input.regionPriceAmbiguous !== true
+    );
+  }
+
   if (input.verification.verificationStatus !== "VERIFIED") return false;
   if (input.blockedBySafetyRule.some((b) => BUYER_TRUTH_BLOCKERS.has(b))) return false;
   if (input.regionPriceAmbiguous === true) return false;
-  const ps = typeof input.parseStatus === "string" ? input.parseStatus : "";
   if (WEAK_PARSE_STATUSES.has(ps)) return false;
   return true;
 }

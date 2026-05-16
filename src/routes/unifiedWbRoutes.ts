@@ -335,8 +335,9 @@ export function registerUnifiedWbRoutes(app: FastifyInstance): void {
   });
 
   app.get("/api/floor/region-prices", async () => {
+    const activeCabinet = await prisma.sellerCabinet.findFirst({ where: { isActive: true }, select: { id: true } });
     const products = await prisma.wbProduct.findMany({
-      where: { isActive: true },
+      where: { isActive: true, ...(activeCabinet ? { cabinetId: activeCabinet.id } : {}) },
       orderBy: { nmId: "asc" },
       select: {
         nmId: true,
